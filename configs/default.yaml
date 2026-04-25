@@ -1,0 +1,74 @@
+seed: 42
+task: fact_verification
+num_labels: 2
+
+data:
+  train_path: data/HOVER/converted_data/train.json
+  val_path: data/HOVER/converted_data/dev.json
+  test_path: data/HOVER/converted_data/dev.json
+  routing_path: data/HOVER/routed/train_routing.jsonl
+  max_claim_len: 128
+  max_evidence_len: 384
+  max_seq_len: 512
+  num_workers: 0
+  evidence_placeholder: "[NO_EVIDENCE]"
+  label_map:
+    SUPPORTS: 0
+    REFUTES: 1
+
+model:
+  shortcut_encoder: roberta-base
+  grounded_encoder: roberta-base
+  hidden_size: 768
+  dropout: 0.1
+  use_fusion: false
+
+training:
+  epochs: 3
+  batch_size: 16
+  lr: 2e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+
+loss:
+  lambda_shortcut: 0.3
+  lambda_orth: 0.0
+  lambda_fusion: 0.5
+  grounded_needed_weight: 1.5
+  hard_weight: 1.0
+  bias_easy_weight: 0.5
+
+routing:
+  strategy: hybrid
+  tau_shortcut_high: 0.8
+  tau_disagreement_low: 0.1
+  top_pct: 0.3
+  bottom_pct: 0.3
+  group_weights:
+    bias_easy: 0.5
+    grounded_needed: 1.5
+    hard: 1.0
+  necessity_weights:
+    grounded_beats_shortcut: 1.0
+    shortcut_trap: 0.5
+    disagreement: 0.5
+    uncertainty: 0.25
+
+remix:
+  schedule: alternating
+  batch_types: [bias, grounded, mixed]
+  mixed_ratio:
+    bias_easy: 0.3
+    grounded_needed: 0.4
+    hard: 0.3
+
+checkpoints:
+  shortcut: outputs/checkpoints/shortcut_best.pt
+  grounded: outputs/checkpoints/grounded_best.pt
+  remix: outputs/checkpoints/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/checkpoints
+  log_dir: outputs/logs
+  prediction_dir: outputs/predictions

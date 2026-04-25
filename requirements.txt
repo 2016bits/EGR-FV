@@ -1,0 +1,6 @@
+numpy>=1.26
+PyYAML>=6.0
+scikit-learn>=1.4
+torch>=2.2
+tqdm>=4.66
+transformers>=4.41

@@ -2,6 +2,11 @@ seed: 42
 task: fact_verification
 num_labels: 2
 
+experiment:
+  name: full_egr_fv
+  mode: full
+  pseudo_group_strategy: random
+
 data:
   train_path: data/HOVER/converted_data/train.json
   val_path: data/HOVER/converted_data/dev.json
@@ -58,6 +63,10 @@ routing:
 remix:
   schedule: alternating
   batch_types: [bias, grounded, mixed]
+  pseudo_group_ratio:
+    bias_easy: 0.3
+    grounded_needed: 0.4
+    hard: 0.3
   mixed_ratio:
     bias_easy: 0.3
     grounded_needed: 0.4

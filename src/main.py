@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
+from src.data.ablation_groups import assign_pseudo_groups, summarize_record_groups
 from src.data.collator import GroundedCollator, JointCollator, ShortcutCollator
 from src.data.dataset import DEFAULT_ID_TO_LABEL, FactVerificationDataset
 from src.data.routing import run_routing
@@ -18,6 +19,7 @@ from src.trainers.evaluator import Evaluator
 from src.trainers.remix_trainer import RemixTrainer
 from src.trainers.warmup_trainer import WarmupTrainer
 from src.utils.config import load_config
+from src.utils.experiments import experiment_mode, requires_routing_file, uses_pseudo_groups, uses_real_routing
 from src.utils.io import ensure_dir, load_model_state
 from src.utils.seed import set_seed
 
@@ -160,6 +162,7 @@ def main() -> None:
     args = parse_args()
     config = load_config(args.config)
     print("Loaded config:")
+    print(f"Experiment mode: {experiment_mode(config)}")
     ensure_output_dirs(config)
     set_seed(int(config.get("seed", 42)))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -248,12 +251,24 @@ def main() -> None:
         return
 
     if args.mode == "remix":
-        if not Path(config["data"]["routing_path"]).exists():
+        routing_path = Path(config["data"]["routing_path"])
+        if requires_routing_file(config) and not routing_path.exists():
             raise FileNotFoundError(
-                f"Routing file not found: {config['data']['routing_path']}. "
-                "Please run routing mode before remix training."
+                f"Routing file not found: {routing_path}. "
+                "This experiment mode uses real sample routing; please run routing mode first."
             )
-        train_dataset = build_dataset(config, "train", label_to_id, id_to_label, use_routing=True)
+        train_dataset = build_dataset(
+            config,
+            "train",
+            label_to_id,
+            id_to_label,
+            use_routing=uses_real_routing(config),
+        )
+        if uses_pseudo_groups(config):
+            train_dataset = assign_pseudo_groups(train_dataset, config)
+            print(f"Pseudo group stats: {summarize_record_groups(train_dataset.records)}")
+        elif uses_real_routing(config):
+            print(f"Routing group stats: {summarize_record_groups(train_dataset.records)}")
         val_dataset = build_dataset(config, "val", label_to_id, id_to_label)
         print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
 

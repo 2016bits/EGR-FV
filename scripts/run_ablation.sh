@@ -1,0 +1,4 @@
+bash scripts/run_ablation_two_branch.sh
+bash scripts/run_ablation_routing_only.sh
+bash scripts/run_ablation_remix_random.sh
+bash scripts/run_ablation_remix_heuristic.sh

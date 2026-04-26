@@ -1,0 +1,16 @@
+base: default.yaml
+
+experiment:
+  name: ablation_two_branch
+  mode: two_branch_only
+
+loss:
+  lambda_orth: 0.0
+
+outputs:
+  checkpoint_dir: outputs/checkpoints/ablation_two_branch
+  log_dir: outputs/logs/ablation_two_branch
+  prediction_dir: outputs/predictions/ablation_two_branch
+
+checkpoints:
+  remix: outputs/checkpoints/ablation_two_branch/remix_best.pt

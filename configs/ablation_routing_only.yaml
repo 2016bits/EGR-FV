@@ -1,0 +1,13 @@
+base: default.yaml
+
+experiment:
+  name: ablation_routing_only
+  mode: routing_only
+
+outputs:
+  checkpoint_dir: outputs/checkpoints/ablation_routing_only
+  log_dir: outputs/logs/ablation_routing_only
+  prediction_dir: outputs/predictions/ablation_routing_only
+
+checkpoints:
+  remix: outputs/checkpoints/ablation_routing_only/remix_best.pt

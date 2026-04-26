@@ -13,6 +13,7 @@ from transformers import get_linear_schedule_with_warmup
 from src.data.remix_sampler import RemixBatchScheduler
 from src.models.losses import cross_entropy_loss, orthogonality_loss, weighted_cross_entropy
 from src.trainers.evaluator import Evaluator
+from src.utils.experiments import experiment_mode, uses_batch_remix, uses_uniform_sample_weights
 from src.utils.io import save_torch_checkpoint
 from src.utils.logger import CSVLogger
 
@@ -95,6 +96,9 @@ class RemixTrainer:
         training_cfg = self.config["training"]
         loss_cfg = self.config["loss"]
         remix_cfg = self.config["remix"]
+        mode = experiment_mode(self.config)
+        batch_remix_enabled = uses_batch_remix(self.config)
+        uniform_sample_weights = uses_uniform_sample_weights(self.config)
         num_epochs = int(training_cfg["epochs"])
         lr = float(training_cfg["lr"])
         weight_decay = float(training_cfg.get("weight_decay", 0.0))
@@ -105,30 +109,34 @@ class RemixTrainer:
         fusion_weight = float(loss_cfg.get("lambda_fusion", 0.5))
         use_fusion = bool(self.config["model"].get("use_fusion", False)) and self.fusion_head is not None
 
-        bias_dataset = self.train_dataset.subset({"bias_easy"})
-        grounded_dataset = self.train_dataset.subset({"grounded_needed"})
-        mixed_sampler = self._build_mixed_sampler()
+        plain_loader = None
+        scheduler = None
+        if batch_remix_enabled:
+            bias_dataset = self.train_dataset.subset({"bias_easy"})
+            grounded_dataset = self.train_dataset.subset({"grounded_needed"})
+            mixed_sampler = self._build_mixed_sampler()
 
-        bias_loader = self._build_loader(bias_dataset, shuffle=True) if len(bias_dataset) else None
-        grounded_loader = self._build_loader(grounded_dataset, shuffle=True) if len(grounded_dataset) else None
-        mixed_loader = self._build_loader(self.train_dataset, sampler=mixed_sampler) if len(self.train_dataset) else None
+            bias_loader = self._build_loader(bias_dataset, shuffle=True) if len(bias_dataset) else None
+            grounded_loader = self._build_loader(grounded_dataset, shuffle=True) if len(grounded_dataset) else None
+            mixed_loader = self._build_loader(self.train_dataset, sampler=mixed_sampler) if len(self.train_dataset) else None
 
-        scheduler = RemixBatchScheduler(
-            bias_loader=bias_loader,
-            grounded_loader=grounded_loader,
-            mixed_loader=mixed_loader,
-            schedule_type=str(remix_cfg.get("schedule", "alternating")),
-            fixed_ratio=remix_cfg.get("batch_ratio"),
-            max_epochs=num_epochs,
-            seed=int(self.config.get("seed", 42)),
-        )
-
-        steps_per_epoch = int(
-            remix_cfg.get(
-                "steps_per_epoch",
-                max(len(loader) for loader in [bias_loader, grounded_loader, mixed_loader] if loader is not None),
+            scheduler = RemixBatchScheduler(
+                bias_loader=bias_loader,
+                grounded_loader=grounded_loader,
+                mixed_loader=mixed_loader,
+                schedule_type=str(remix_cfg.get("schedule", "alternating")),
+                fixed_ratio=remix_cfg.get("batch_ratio"),
+                max_epochs=num_epochs,
+                seed=int(self.config.get("seed", 42)),
             )
-        )
+            default_steps_per_epoch = max(
+                len(loader) for loader in [bias_loader, grounded_loader, mixed_loader] if loader is not None
+            )
+        else:
+            plain_loader = self._build_loader(self.train_dataset, shuffle=True)
+            default_steps_per_epoch = len(plain_loader)
+
+        steps_per_epoch = int(remix_cfg.get("steps_per_epoch", default_steps_per_epoch))
 
         parameters = list(self.shortcut_model.parameters()) + list(self.grounded_model.parameters())
         if self.fusion_head is not None:
@@ -158,13 +166,25 @@ class RemixTrainer:
                 "loss_orth": 0.0,
                 "loss_fusion": 0.0,
             }
-            progress = tqdm(range(steps_per_epoch), desc=f"remix:epoch{epoch + 1}", leave=False)
+            plain_iterator = iter(plain_loader) if plain_loader is not None else None
+            progress = tqdm(range(steps_per_epoch), desc=f"{mode}:epoch{epoch + 1}", leave=False)
             for global_step in progress:
-                batch_type, batch = scheduler.next_batch(global_step=global_step, epoch=epoch)
+                if scheduler is not None:
+                    batch_type, batch = scheduler.next_batch(global_step=global_step, epoch=epoch)
+                else:
+                    batch_type = "random"
+                    try:
+                        batch = next(plain_iterator)
+                    except StopIteration:
+                        plain_iterator = iter(plain_loader)
+                        batch = next(plain_iterator)
+
                 shortcut_inputs = {key: value.to(self.device) for key, value in batch["shortcut_inputs"].items()}
                 grounded_inputs = {key: value.to(self.device) for key, value in batch["grounded_inputs"].items()}
                 labels = batch["labels"].to(self.device)
                 sample_weights = batch["weights"].to(self.device)
+                if uniform_sample_weights:
+                    sample_weights = torch.ones_like(sample_weights)
 
                 shortcut_outputs = self.shortcut_model(**shortcut_inputs)
                 grounded_outputs = self.grounded_model(**grounded_inputs)
@@ -183,7 +203,9 @@ class RemixTrainer:
                     )
                     loss_f = weighted_cross_entropy(fused_outputs["logits"], labels, sample_weights)
 
-                if batch_type == "bias":
+                if mode == "two_branch_only":
+                    total_loss = loss_g + lambda_shortcut * loss_s + lambda_orth * loss_o
+                elif batch_type == "bias":
                     total_loss = loss_s + 0.1 * loss_g
                 elif batch_type == "grounded":
                     total_loss = 1.5 * loss_g + 0.2 * loss_s + lambda_orth * loss_o

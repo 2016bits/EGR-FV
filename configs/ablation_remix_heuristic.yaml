@@ -1,0 +1,18 @@
+base: default.yaml
+
+experiment:
+  name: ablation_remix_heuristic
+  mode: remix_only
+  pseudo_group_strategy: heuristic
+  pseudo_group_ratio:
+    bias_easy: 0.3
+    grounded_needed: 0.4
+    hard: 0.3
+
+outputs:
+  checkpoint_dir: outputs/checkpoints/ablation_remix_heuristic
+  log_dir: outputs/logs/ablation_remix_heuristic
+  prediction_dir: outputs/predictions/ablation_remix_heuristic
+
+checkpoints:
+  remix: outputs/checkpoints/ablation_remix_heuristic/remix_best.pt

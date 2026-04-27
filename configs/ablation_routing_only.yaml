@@ -1,7 +1,7 @@
-base: default.yaml
+base: remix.yaml
 
 experiment:
-  name: ablation_routing_only
+  name: ablation_no_remix
   mode: routing_only
 
 outputs:

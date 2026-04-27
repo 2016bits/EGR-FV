@@ -61,21 +61,62 @@ class RemixTrainer:
             collate_fn=self.joint_collator,
         )
 
+    def _build_balanced_sampler(self, dataset, group_ratios: Mapping[str, float] | None = None):
+        if not len(dataset):
+            return None
+
+        label_balance = bool(self.config["remix"].get("label_balance", False))
+        if group_ratios is None and not label_balance:
+            return None
+
+        counts_by_label = Counter(record["label"] for record in dataset.records if int(record["label"]) >= 0)
+        counts_by_group = Counter(record["group"] for record in dataset.records)
+        weights = []
+        for record in dataset.records:
+            weight = 1.0
+            if group_ratios is not None:
+                group = record["group"]
+                target_ratio = float(group_ratios.get(group, 0.0))
+                count = max(1, counts_by_group.get(group, 0))
+                weight *= target_ratio / count if target_ratio > 0 else 0.0
+            if label_balance and int(record["label"]) >= 0:
+                weight *= 1.0 / max(1, counts_by_label.get(record["label"], 0))
+            weights.append(weight)
+
+        if not any(weight > 0 for weight in weights):
+            return None
+        return WeightedRandomSampler(weights=weights, num_samples=len(weights), replacement=True)
+
     def _build_mixed_sampler(self):
         ratios = self.config["remix"].get(
             "mixed_ratio",
             {"bias_easy": 0.3, "grounded_needed": 0.4, "hard": 0.3},
         )
-        counts = Counter(record["group"] for record in self.train_dataset.records)
-        weights = []
-        for record in self.train_dataset.records:
-            group = record["group"]
-            target_ratio = float(ratios.get(group, 0.0))
-            count = max(1, counts.get(group, 0))
-            weights.append(target_ratio / count if target_ratio > 0 else 0.0)
-        if not any(weight > 0 for weight in weights):
-            return None
-        return WeightedRandomSampler(weights=weights, num_samples=len(weights), replacement=True)
+        return self._build_balanced_sampler(self.train_dataset, group_ratios=ratios)
+
+    def _batch_loss_coefficients(
+        self,
+        batch_type: str,
+        mode: str,
+        lambda_shortcut: float,
+        lambda_orth: float,
+    ) -> tuple[float, float, float]:
+        configured = self.config["remix"].get("loss_weights", {})
+        if batch_type in configured:
+            weights = configured[batch_type]
+            return (
+                float(weights.get("grounded", 1.0)),
+                float(weights.get("shortcut", lambda_shortcut)),
+                float(weights.get("orth", 1.0)) * lambda_orth,
+            )
+
+        if mode == "two_branch_only":
+            return 1.0, lambda_shortcut, lambda_orth
+        if batch_type == "bias":
+            return 0.1, 1.0, 0.0
+        if batch_type == "grounded":
+            return 1.5, 0.2, lambda_orth
+        return 1.0, lambda_shortcut, lambda_orth
 
     def _build_evaluator(self) -> Evaluator:
         return Evaluator(
@@ -115,9 +156,19 @@ class RemixTrainer:
             bias_dataset = self.train_dataset.subset({"bias_easy"})
             grounded_dataset = self.train_dataset.subset({"grounded_needed"})
             mixed_sampler = self._build_mixed_sampler()
+            bias_sampler = self._build_balanced_sampler(bias_dataset)
+            grounded_sampler = self._build_balanced_sampler(grounded_dataset)
 
-            bias_loader = self._build_loader(bias_dataset, shuffle=True) if len(bias_dataset) else None
-            grounded_loader = self._build_loader(grounded_dataset, shuffle=True) if len(grounded_dataset) else None
+            bias_loader = (
+                self._build_loader(bias_dataset, shuffle=bias_sampler is None, sampler=bias_sampler)
+                if len(bias_dataset)
+                else None
+            )
+            grounded_loader = (
+                self._build_loader(grounded_dataset, shuffle=grounded_sampler is None, sampler=grounded_sampler)
+                if len(grounded_dataset)
+                else None
+            )
             mixed_loader = self._build_loader(self.train_dataset, sampler=mixed_sampler) if len(self.train_dataset) else None
 
             scheduler = RemixBatchScheduler(
@@ -133,7 +184,12 @@ class RemixTrainer:
                 len(loader) for loader in [bias_loader, grounded_loader, mixed_loader] if loader is not None
             )
         else:
-            plain_loader = self._build_loader(self.train_dataset, shuffle=True)
+            plain_sampler = self._build_balanced_sampler(self.train_dataset)
+            plain_loader = self._build_loader(
+                self.train_dataset,
+                shuffle=plain_sampler is None,
+                sampler=plain_sampler,
+            )
             default_steps_per_epoch = len(plain_loader)
 
         steps_per_epoch = int(remix_cfg.get("steps_per_epoch", default_steps_per_epoch))
@@ -203,14 +259,13 @@ class RemixTrainer:
                     )
                     loss_f = weighted_cross_entropy(fused_outputs["logits"], labels, sample_weights)
 
-                if mode == "two_branch_only":
-                    total_loss = loss_g + lambda_shortcut * loss_s + lambda_orth * loss_o
-                elif batch_type == "bias":
-                    total_loss = loss_s + 0.1 * loss_g
-                elif batch_type == "grounded":
-                    total_loss = 1.5 * loss_g + 0.2 * loss_s + lambda_orth * loss_o
-                else:
-                    total_loss = loss_g + lambda_shortcut * loss_s + lambda_orth * loss_o
+                grounded_coef, shortcut_coef, orth_coef = self._batch_loss_coefficients(
+                    batch_type=batch_type,
+                    mode=mode,
+                    lambda_shortcut=lambda_shortcut,
+                    lambda_orth=lambda_orth,
+                )
+                total_loss = grounded_coef * loss_g + shortcut_coef * loss_s + orth_coef * loss_o
 
                 if use_fusion:
                     total_loss = total_loss + fusion_weight * loss_f

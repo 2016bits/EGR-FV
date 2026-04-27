@@ -47,4 +47,7 @@ def uses_pseudo_groups(config: Mapping[str, Any]) -> bool:
 
 
 def uses_uniform_sample_weights(config: Mapping[str, Any]) -> bool:
+    experiment_cfg = config.get("experiment", {})
+    if isinstance(experiment_cfg, Mapping) and "uniform_sample_weights" in experiment_cfg:
+        return bool(experiment_cfg["uniform_sample_weights"])
     return experiment_mode(config) == "two_branch_only"

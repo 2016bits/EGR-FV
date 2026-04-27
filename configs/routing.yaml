@@ -1,1 +1,7 @@
 base: default.yaml
+
+routing:
+  group_weights:
+    bias_easy: 0.7
+    grounded_needed: 1.4
+    hard: 1.0

@@ -1,13 +1,13 @@
-base: default.yaml
+base: remix.yaml
 
 experiment:
-  name: ablation_remix_random
+  name: ablation_no_routing_random
   mode: remix_only
   pseudo_group_strategy: random
   pseudo_group_ratio:
-    bias_easy: 0.3
+    bias_easy: 0.2
     grounded_needed: 0.4
-    hard: 0.3
+    hard: 0.4
 
 outputs:
   checkpoint_dir: outputs/checkpoints/ablation_remix_random

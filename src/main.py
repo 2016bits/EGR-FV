@@ -20,7 +20,7 @@ from src.trainers.remix_trainer import RemixTrainer
 from src.trainers.warmup_trainer import WarmupTrainer
 from src.utils.config import load_config
 from src.utils.experiments import experiment_mode, requires_routing_file, uses_pseudo_groups, uses_real_routing
-from src.utils.io import ensure_dir, load_model_state
+from src.utils.io import ensure_dir, load_json_or_jsonl, load_model_state
 from src.utils.seed import set_seed
 
 
@@ -158,6 +158,17 @@ def ensure_output_dirs(config: Mapping[str, Any]) -> None:
     ensure_dir(routing_path.parent)
 
 
+def validate_routing_cache(config: Mapping[str, Any], routing_path: Path) -> None:
+    if not bool(config.get("routing", {}).get("stratify_by_label", False)):
+        return
+    records = load_json_or_jsonl(routing_path)
+    if records and "label_id" not in records[0]:
+        raise ValueError(
+            f"Routing cache {routing_path} was generated before label-stratified routing was enabled. "
+            "Please rerun routing mode before remix training."
+        )
+
+
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
@@ -257,6 +268,8 @@ def main() -> None:
                 f"Routing file not found: {routing_path}. "
                 "This experiment mode uses real sample routing; please run routing mode first."
             )
+        if uses_real_routing(config):
+            validate_routing_cache(config, routing_path)
         train_dataset = build_dataset(
             config,
             "train",
@@ -275,6 +288,7 @@ def main() -> None:
         shortcut_model, grounded_model, fusion_head = build_models(config)
         print(f"Models built.")
         remix_ckpt = args.ckpt
+        loaded_remix = False
         if remix_ckpt and Path(remix_ckpt).exists():
             checkpoint = load_model_state(
                 grounded_model,
@@ -286,11 +300,12 @@ def main() -> None:
                 shortcut_model.load_state_dict(checkpoint["shortcut_model_state"])
             if fusion_head is not None and "fusion_head_state" in checkpoint:
                 fusion_head.load_state_dict(checkpoint["fusion_head_state"])
+            loaded_remix = True
         shortcut_ckpt = resolve_ckpt(config, "shortcut", args.shortcut_ckpt)
         grounded_ckpt = resolve_ckpt(config, "grounded", args.grounded_ckpt)
-        if shortcut_ckpt and Path(shortcut_ckpt).exists():
+        if not loaded_remix and shortcut_ckpt and Path(shortcut_ckpt).exists():
             load_model_state(shortcut_model, shortcut_ckpt, ["model_state", "shortcut_model_state"], map_location=device)
-        if grounded_ckpt and Path(grounded_ckpt).exists():
+        if not loaded_remix and grounded_ckpt and Path(grounded_ckpt).exists():
             load_model_state(grounded_model, grounded_ckpt, ["model_state", "grounded_model_state"], map_location=device)
         trainer = RemixTrainer(
             config=config,
@@ -313,8 +328,11 @@ def main() -> None:
     test_dataset = build_dataset(config, "test", label_to_id, id_to_label)
     shortcut_model, grounded_model, fusion_head = build_models(config)
     shortcut_loaded = False
+    fusion_loaded = False
 
     eval_ckpt = resolve_ckpt(config, "remix", args.ckpt)
+    if args.ckpt and not Path(args.ckpt).exists():
+        raise FileNotFoundError(f"Evaluation checkpoint not found: {args.ckpt}")
     if eval_ckpt and Path(eval_ckpt).exists():
         checkpoint = load_model_state(
             grounded_model,
@@ -337,6 +355,7 @@ def main() -> None:
                 shortcut_loaded = True
         if fusion_head is not None and "fusion_head_state" in checkpoint:
             fusion_head.load_state_dict(checkpoint["fusion_head_state"])
+            fusion_loaded = True
     else:
         grounded_ckpt = resolve_ckpt(config, "grounded", args.grounded_ckpt)
         shortcut_ckpt = resolve_ckpt(config, "shortcut", args.shortcut_ckpt)
@@ -355,6 +374,14 @@ def main() -> None:
                 map_location=device,
             )
             shortcut_loaded = True
+
+    fusion_requested = bool(config["model"].get("use_fusion", False)) and fusion_head is not None
+    if fusion_requested and not fusion_loaded:
+        raise ValueError(
+            "Evaluation config requests model.use_fusion=true, but no trained fusion_head_state was loaded. "
+            f"Checkpoint checked: {eval_ckpt}. Please rerun remix training with configs/remix.yaml "
+            "or evaluate with configs/ablation_no_fusion.yaml."
+        )
 
     if not shortcut_loaded:
         shortcut_model = None

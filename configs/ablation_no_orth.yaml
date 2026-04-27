@@ -1,0 +1,16 @@
+base: remix.yaml
+
+experiment:
+  name: ablation_no_orth
+  mode: full
+
+loss:
+  lambda_orth: 0.0
+
+outputs:
+  checkpoint_dir: outputs/checkpoints/ablation_no_orth
+  log_dir: outputs/logs/ablation_no_orth
+  prediction_dir: outputs/predictions/ablation_no_orth
+
+checkpoints:
+  remix: outputs/checkpoints/ablation_no_orth/remix_best.pt

@@ -1,1 +1,53 @@
 base: default.yaml
+
+experiment:
+  name: full_egr_fv
+  mode: full
+
+model:
+  use_fusion: true
+
+training:
+  epochs: 4
+
+loss:
+  lambda_shortcut: 0.2
+  lambda_orth: 0.05
+  lambda_fusion: 1.0
+  grounded_needed_weight: 1.4
+  hard_weight: 1.0
+  bias_easy_weight: 0.7
+
+routing:
+  group_weights:
+    bias_easy: 0.7
+    grounded_needed: 1.4
+    hard: 1.0
+
+remix:
+  schedule: fixed_ratio
+  batch_ratio:
+    bias: 0.1
+    grounded: 0.35
+    mixed: 0.55
+  mixed_ratio:
+    bias_easy: 0.2
+    grounded_needed: 0.4
+    hard: 0.4
+  loss_weights:
+    random:
+      grounded: 1.0
+      shortcut: 0.2
+      orth: 1.0
+    bias:
+      grounded: 0.8
+      shortcut: 0.25
+      orth: 0.0
+    grounded:
+      grounded: 1.25
+      shortcut: 0.15
+      orth: 1.0
+    mixed:
+      grounded: 1.0
+      shortcut: 0.2
+      orth: 1.0

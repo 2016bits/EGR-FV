@@ -1,8 +1,12 @@
-base: default.yaml
+base: remix.yaml
 
 experiment:
   name: ablation_two_branch
   mode: two_branch_only
+  uniform_sample_weights: true
+
+model:
+  use_fusion: false
 
 loss:
   lambda_orth: 0.0

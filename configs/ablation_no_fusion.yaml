@@ -1,0 +1,16 @@
+base: remix.yaml
+
+experiment:
+  name: ablation_no_fusion
+  mode: full
+
+model:
+  use_fusion: false
+
+outputs:
+  checkpoint_dir: outputs/checkpoints/ablation_no_fusion
+  log_dir: outputs/logs/ablation_no_fusion
+  prediction_dir: outputs/predictions/ablation_no_fusion
+
+checkpoints:
+  remix: outputs/checkpoints/ablation_no_fusion/remix_best.pt

@@ -1,0 +1,14 @@
+base: remix.yaml
+
+experiment:
+  name: ablation_no_sample_weights
+  mode: full
+  uniform_sample_weights: true
+
+outputs:
+  checkpoint_dir: outputs/checkpoints/ablation_real_remix_no_weight
+  log_dir: outputs/logs/ablation_real_remix_no_weight
+  prediction_dir: outputs/predictions/ablation_real_remix_no_weight
+
+checkpoints:
+  remix: outputs/checkpoints/ablation_real_remix_no_weight/remix_best.pt

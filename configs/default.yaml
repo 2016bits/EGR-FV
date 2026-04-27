@@ -45,7 +45,9 @@ loss:
   bias_easy_weight: 0.5
 
 routing:
-  strategy: hybrid
+  strategy: score_based
+  stratify_by_label: true
+  stratified_strategy: score_based
   tau_shortcut_high: 0.8
   tau_disagreement_low: 0.1
   top_pct: 0.3
@@ -63,6 +65,24 @@ routing:
 remix:
   schedule: alternating
   batch_types: [bias, grounded, mixed]
+  label_balance: true
+  loss_weights:
+    random:
+      grounded: 1.0
+      shortcut: 0.3
+      orth: 1.0
+    bias:
+      grounded: 0.7
+      shortcut: 0.2
+      orth: 0.0
+    grounded:
+      grounded: 1.2
+      shortcut: 0.2
+      orth: 1.0
+    mixed:
+      grounded: 1.0
+      shortcut: 0.3
+      orth: 1.0
   pseudo_group_ratio:
     bias_easy: 0.3
     grounded_needed: 0.4

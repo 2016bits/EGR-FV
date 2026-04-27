@@ -185,8 +185,8 @@ class Evaluator:
             write_jsonl(predictions_path, prediction_records)
         return result
 
-    def evaluate_sensitivity(self, dataset: FactVerificationDataset) -> Dict[str, Any]:
-        base_report = self.evaluate_dataset(dataset, mode="grounded")
+    def evaluate_sensitivity(self, dataset: FactVerificationDataset, mode: str = "grounded") -> Dict[str, Any]:
+        base_report = self.evaluate_dataset(dataset, mode=mode)
 
         no_evidence_records = []
         for record in dataset.records:
@@ -195,7 +195,7 @@ class Evaluator:
             updated["evidence_text"] = self.evidence_placeholder
             no_evidence_records.append(updated)
         no_evidence_dataset = dataset.clone_with_records(no_evidence_records)
-        remove_report = self.evaluate_dataset(no_evidence_dataset, mode="grounded")
+        remove_report = self.evaluate_dataset(no_evidence_dataset, mode=mode)
 
         shuffled_evidence = [record["evidence_text"] for record in dataset.records]
         if shuffled_evidence:
@@ -209,13 +209,16 @@ class Evaluator:
             updated["evidence_text"] = str(evidence_text)
             shuffled_records.append(updated)
         shuffled_dataset = dataset.clone_with_records(shuffled_records)
-        shuffle_report = self.evaluate_dataset(shuffled_dataset, mode="grounded")
+        shuffle_report = self.evaluate_dataset(shuffled_dataset, mode=mode)
 
         sensitivity = {
-            "grounded": base_report["metrics"],
+            mode: base_report["metrics"],
             "remove_evidence": remove_report["metrics"],
             "shuffle_evidence": shuffle_report["metrics"],
         }
+        if mode != "grounded":
+            grounded_report = self.evaluate_dataset(dataset, mode="grounded")
+            sensitivity["grounded_branch"] = grounded_report["metrics"]
         if self.shortcut_model is not None:
             shortcut_report = self.evaluate_dataset(dataset, mode="shortcut")
             sensitivity["claim_only"] = shortcut_report["metrics"]
@@ -229,7 +232,7 @@ class Evaluator:
         mode: str = "grounded",
     ) -> Dict[str, Any]:
         base_report = self.evaluate_dataset(dataset, mode=mode, predictions_path=predictions_path)
-        sensitivity_report = self.evaluate_sensitivity(dataset)
+        sensitivity_report = self.evaluate_sensitivity(dataset, mode=mode)
         full_report = {
             "base": {
                 "mode": base_report["mode"],

@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 EXPERIMENTS = [
-    ("full_egr_fv", Path("outputs/predictions/eval_report.json")),
+    ("full_egr_fv", Path("outputs/HOVER/predictions/eval_report.json")),
     ("two_branch_baseline", Path("outputs/predictions/ablation_two_branch/eval_report.json")),
     ("no_batch_remix", Path("outputs/predictions/ablation_routing_only/eval_report.json")),
     ("no_sample_weights", Path("outputs/predictions/ablation_real_remix_no_weight/eval_report.json")),

@@ -10,7 +10,7 @@ experiment:
 data:
   train_path: data/HOVER/converted_data/train.json
   val_path: data/HOVER/converted_data/dev.json
-  test_path: data/HOVER/converted_data/dev.json
+  test_path: data/HOVER/converted_data/test.json
   routing_path: data/HOVER/routed/train_routing.jsonl
   max_claim_len: 128
   max_evidence_len: 384
@@ -30,7 +30,7 @@ model:
 
 training:
   epochs: 3
-  batch_size: 16
+  batch_size: 32
   lr: 2e-5
   weight_decay: 0.01
   warmup_ratio: 0.1
@@ -93,11 +93,11 @@ remix:
     hard: 0.3
 
 checkpoints:
-  shortcut: outputs/checkpoints/shortcut_best.pt
-  grounded: outputs/checkpoints/grounded_best.pt
-  remix: outputs/checkpoints/remix_best.pt
+  shortcut: outputs/HOVER/checkpoints/shortcut_best.pt
+  grounded: outputs/HOVER/checkpoints/grounded_best.pt
+  remix: outputs/HOVER/checkpoints/remix_best.pt
 
 outputs:
-  checkpoint_dir: outputs/checkpoints
-  log_dir: outputs/logs
-  prediction_dir: outputs/predictions
+  checkpoint_dir: outputs/HOVER/checkpoints
+  log_dir: outputs/HOVER/logs
+  prediction_dir: outputs/HOVER/predictions

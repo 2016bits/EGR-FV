@@ -1,0 +1,34 @@
+base: default.yaml
+
+experiment:
+  name: full_egr_fv_fever
+  mode: full
+
+data:
+  train_path: data/FEVER/converted_data/train.json
+  val_path: data/FEVER/converted_data/dev.json
+  test_path: data/FEVER/converted_data/test.json
+  routing_path: data/FEVER/routed/train_routing.jsonl
+  max_claim_len: 96
+  max_evidence_len: 256
+  max_seq_len: 384
+  num_workers: 0
+  evidence_placeholder: "[NO_EVIDENCE]"
+  label_map:
+    SUPPORTS: 0
+    REFUTES: 1
+
+checkpoints:
+  shortcut: outputs/FEVER/checkpoints/shortcut_best.pt
+  grounded: outputs/FEVER/checkpoints/grounded_best.pt
+  remix: outputs/FEVER/checkpoints/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/FEVER/checkpoints
+  log_dir: outputs/FEVER/logs
+  prediction_dir: outputs/FEVER/predictions
+
+training:
+  epochs: 3
+  batch_size: 32
+  lr: 2e-5

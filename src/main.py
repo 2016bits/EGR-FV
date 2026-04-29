@@ -1,8 +1,112 @@
 from __future__ import annotations
 
 import argparse
+import glob
+import importlib.util
+import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, Mapping
+
+
+REQUIRED_MODULES = ("torch", "transformers", "yaml", "sklearn", "tqdm")
+PYTHON_BOOTSTRAP_FLAG = "EGRFV_BOOTSTRAPPED_PYTHON"
+
+
+def _missing_required_modules() -> list[str]:
+    return [name for name in REQUIRED_MODULES if importlib.util.find_spec(name) is None]
+
+
+def _python_has_required_modules(python_bin: str) -> bool:
+    code = (
+        "import importlib.util, sys; "
+        f"required = {REQUIRED_MODULES!r}; "
+        "missing = [name for name in required if importlib.util.find_spec(name) is None]; "
+        "sys.exit(0 if not missing else 1)"
+    )
+    try:
+        result = subprocess.run(
+            [python_bin, "-c", code],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def _iter_python_candidates():
+    requested_python = os.environ.get("PYTHON_BIN", "python")
+    current_user = os.environ.get("USER", "")
+    home_dir = os.environ.get("HOME", "")
+
+    preferred = [
+        requested_python,
+        os.path.join(home_dir, ".conda", "envs", "tor230", "bin", "python"),
+        os.path.join("/data", current_user, ".conda", "envs", "tor230", "bin", "python"),
+        "/data/yangjun/.conda/envs/tor230/bin/python",
+        os.path.join(home_dir, ".conda", "envs", "egrfv", "bin", "python"),
+        os.path.join("/data", current_user, ".conda", "envs", "egrfv", "bin", "python"),
+        "/data/yangjun/.conda/envs/egrfv/bin/python",
+    ]
+
+    for root in (
+        os.path.join(home_dir, ".conda", "envs"),
+        os.path.join("/data", current_user, ".conda", "envs"),
+        "/data/yangjun/.conda/envs",
+    ):
+        preferred.extend(glob.glob(os.path.join(root, "*", "bin", "python")))
+
+    seen = set()
+    for candidate in preferred:
+        if not candidate:
+            continue
+        has_path_sep = os.path.sep in candidate or (os.path.altsep is not None and os.path.altsep in candidate)
+        if has_path_sep:
+            resolved = candidate
+        else:
+            resolved = shutil.which(candidate)
+            if resolved is None:
+                continue
+        resolved = os.path.abspath(resolved)
+        if resolved in seen or not os.path.exists(resolved):
+            continue
+        seen.add(resolved)
+        yield resolved
+
+
+def _bootstrap_python_with_required_modules() -> None:
+    missing = _missing_required_modules()
+    if not missing:
+        return
+
+    if os.environ.get(PYTHON_BOOTSTRAP_FLAG) == "1":
+        missing_text = ", ".join(missing)
+        raise SystemExit(
+            f"Missing required Python modules: {missing_text}. "
+            "Install dependencies with `pip install -r requirements.txt`."
+        )
+
+    current_python = os.path.abspath(sys.executable)
+    for candidate in _iter_python_candidates():
+        if os.path.abspath(candidate) == current_python:
+            continue
+        if _python_has_required_modules(candidate):
+            env = os.environ.copy()
+            env[PYTHON_BOOTSTRAP_FLAG] = "1"
+            os.execve(candidate, [candidate, "-m", "src.main", *sys.argv[1:]], env)
+
+    missing_text = ", ".join(missing)
+    raise SystemExit(
+        f"Missing required Python modules in {sys.executable}: {missing_text}. "
+        "Set PYTHON_BIN=/path/to/python or install dependencies with `pip install -r requirements.txt`."
+    )
+
+
+_bootstrap_python_with_required_modules()
 
 import torch
 from torch.utils.data import DataLoader
@@ -149,6 +253,15 @@ def resolve_ckpt(config: Mapping[str, Any], key: str, override: str | None = Non
     return config.get("checkpoints", {}).get(key)
 
 
+def require_existing_file(path: str | None, description: str) -> str:
+    if not path:
+        raise FileNotFoundError(f"{description} path is not configured.")
+    file_path = Path(path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"{description} not found: {file_path}")
+    return str(file_path)
+
+
 def ensure_output_dirs(config: Mapping[str, Any]) -> None:
     outputs_cfg = config["outputs"]
     ensure_dir(outputs_cfg["checkpoint_dir"])
@@ -159,9 +272,22 @@ def ensure_output_dirs(config: Mapping[str, Any]) -> None:
 
 
 def validate_routing_cache(config: Mapping[str, Any], routing_path: Path) -> None:
+    records = load_json_or_jsonl(routing_path)
+    if not records:
+        raise ValueError(
+            f"Routing cache {routing_path} is empty. "
+            "Please rerun routing mode before remix training."
+        )
+    required_keys = {"id", "group", "sample_weight"}
+    missing_keys = required_keys - set(records[0])
+    if missing_keys:
+        missing = ", ".join(sorted(missing_keys))
+        raise ValueError(
+            f"Routing cache {routing_path} is missing required key(s): {missing}. "
+            "Please rerun routing mode before remix training."
+        )
     if not bool(config.get("routing", {}).get("stratify_by_label", False)):
         return
-    records = load_json_or_jsonl(routing_path)
     if records and "label_id" not in records[0]:
         raise ValueError(
             f"Routing cache {routing_path} was generated before label-stratified routing was enabled. "
@@ -242,8 +368,8 @@ def main() -> None:
         print("Models built.")
         shortcut_ckpt = resolve_ckpt(config, "shortcut", args.shortcut_ckpt)
         grounded_ckpt = resolve_ckpt(config, "grounded", args.grounded_ckpt)
-        if not shortcut_ckpt or not grounded_ckpt:
-            raise ValueError("Routing mode requires both shortcut and grounded checkpoints.")
+        shortcut_ckpt = require_existing_file(shortcut_ckpt, "Shortcut warmup checkpoint")
+        grounded_ckpt = require_existing_file(grounded_ckpt, "Grounded warmup checkpoint")
         load_model_state(shortcut_model, shortcut_ckpt, ["model_state", "shortcut_model_state"], map_location=device)
         load_model_state(grounded_model, grounded_ckpt, ["model_state", "grounded_model_state"], map_location=device)
         shortcut_model.to(device)
@@ -289,7 +415,8 @@ def main() -> None:
         print(f"Models built.")
         remix_ckpt = args.ckpt
         loaded_remix = False
-        if remix_ckpt and Path(remix_ckpt).exists():
+        if remix_ckpt:
+            remix_ckpt = require_existing_file(remix_ckpt, "Remix checkpoint")
             checkpoint = load_model_state(
                 grounded_model,
                 remix_ckpt,
@@ -303,9 +430,10 @@ def main() -> None:
             loaded_remix = True
         shortcut_ckpt = resolve_ckpt(config, "shortcut", args.shortcut_ckpt)
         grounded_ckpt = resolve_ckpt(config, "grounded", args.grounded_ckpt)
-        if not loaded_remix and shortcut_ckpt and Path(shortcut_ckpt).exists():
+        if not loaded_remix:
+            shortcut_ckpt = require_existing_file(shortcut_ckpt, "Shortcut warmup checkpoint")
+            grounded_ckpt = require_existing_file(grounded_ckpt, "Grounded warmup checkpoint")
             load_model_state(shortcut_model, shortcut_ckpt, ["model_state", "shortcut_model_state"], map_location=device)
-        if not loaded_remix and grounded_ckpt and Path(grounded_ckpt).exists():
             load_model_state(grounded_model, grounded_ckpt, ["model_state", "grounded_model_state"], map_location=device)
         trainer = RemixTrainer(
             config=config,

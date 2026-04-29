@@ -1470,9 +1470,7 @@ python -m src.main \
 ```bash
 python -m src.main \
   --config configs/routing.yaml \
-  --mode routing \
-  --shortcut_ckpt outputs/checkpoints/shortcut_best.pt \
-  --grounded_ckpt outputs/checkpoints/grounded_best.pt
+  --mode routing
 ```
 
 ---
@@ -1496,8 +1494,7 @@ python -m src.main \
 ```bash
 python -m src.main \
   --config configs/remix.yaml \
-  --mode eval \
-  --ckpt outputs/checkpoints/remix_best.pt
+  --mode eval
 ```
 
 ---

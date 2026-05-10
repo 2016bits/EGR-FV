@@ -1,0 +1,13 @@
+base: remix.yaml
+
+experiment:
+  name: fusion_inference
+  mode: fusion_inference
+
+outputs:
+  prediction_dir: outputs/HOVER/predictions/fusion_inference
+
+inference:
+  branch: fusion
+  fusion_method: probability_average
+  fusion_alpha: 0.5

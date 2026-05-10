@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import glob
 import importlib.util
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -115,7 +117,7 @@ from transformers import AutoTokenizer
 from src.data.ablation_groups import assign_pseudo_groups, summarize_record_groups
 from src.data.collator import GroundedCollator, JointCollator, ShortcutCollator
 from src.data.dataset import DEFAULT_ID_TO_LABEL, FactVerificationDataset
-from src.data.routing import run_routing
+from src.data.routing import run_routing, summarize_groups
 from src.models.fusion_head import GatedFusionHead
 from src.models.grounded_model import GroundedModel
 from src.models.shortcut_model import ShortcutModel
@@ -124,7 +126,7 @@ from src.trainers.remix_trainer import RemixTrainer
 from src.trainers.warmup_trainer import WarmupTrainer
 from src.utils.config import load_config
 from src.utils.experiments import experiment_mode, requires_routing_file, uses_pseudo_groups, uses_real_routing
-from src.utils.io import ensure_dir, load_json_or_jsonl, load_model_state
+from src.utils.io import ensure_dir, load_json_or_jsonl, load_model_state, write_json, write_jsonl
 from src.utils.seed import set_seed
 
 
@@ -271,6 +273,17 @@ def ensure_output_dirs(config: Mapping[str, Any]) -> None:
     ensure_dir(routing_path.parent)
 
 
+def config_with_warmup_epochs(config: Mapping[str, Any], branch: str) -> Dict[str, Any]:
+    updated = deepcopy(dict(config))
+    warmup_cfg = updated.get("warmup", {})
+    key = f"{branch}_epochs"
+    if key in warmup_cfg:
+        updated["training"]["epochs"] = int(warmup_cfg[key])
+    if "lr" in warmup_cfg:
+        updated["training"]["lr"] = warmup_cfg["lr"]
+    return updated
+
+
 def validate_routing_cache(config: Mapping[str, Any], routing_path: Path) -> None:
     records = load_json_or_jsonl(routing_path)
     if not records:
@@ -278,7 +291,9 @@ def validate_routing_cache(config: Mapping[str, Any], routing_path: Path) -> Non
             f"Routing cache {routing_path} is empty. "
             "Please rerun routing mode before remix training."
         )
-    required_keys = {"id", "group", "sample_weight"}
+    required_keys = {"id", "group", "sample_weight", "necessity_score"}
+    if uses_real_routing(config):
+        required_keys.update({"grounded_loss_weight", "shortcut_loss_weight"})
     missing_keys = required_keys - set(records[0])
     if missing_keys:
         missing = ", ".join(sorted(missing_keys))
@@ -293,6 +308,139 @@ def validate_routing_cache(config: Mapping[str, Any], routing_path: Path) -> Non
             f"Routing cache {routing_path} was generated before label-stratified routing was enabled. "
             "Please rerun routing mode before remix training."
         )
+
+
+def resolve_eval_mode(config: Mapping[str, Any], shortcut_loaded: bool, fusion_head) -> str:
+    inference_cfg = config.get("inference", {})
+    requested_branch = str(inference_cfg.get("branch", "")).strip().lower()
+    if requested_branch in {"grounded", "grounded_only", ""}:
+        return "grounded"
+    if requested_branch in {"shortcut", "shortcut_only"}:
+        if not shortcut_loaded:
+            raise ValueError("inference.branch=shortcut requires a loaded shortcut checkpoint.")
+        return "shortcut"
+    if requested_branch == "fusion":
+        if not shortcut_loaded:
+            raise ValueError("inference.branch=fusion requires a loaded shortcut checkpoint.")
+        return "fusion"
+    raise ValueError(
+        f"Unsupported inference.branch={requested_branch!r}. "
+        "Expected grounded, shortcut, or fusion."
+    )
+
+
+def run_out_of_fold_routing(
+    config: Mapping[str, Any],
+    records,
+    label_to_id: Mapping[str, int],
+    id_to_label: Mapping[int, str],
+    shortcut_collator,
+    grounded_collator,
+    joint_collator,
+    device: torch.device,
+) -> None:
+    routing_cfg = config["routing"]
+    num_folds = int(routing_cfg.get("num_folds", 5))
+    if num_folds < 2:
+        raise ValueError("routing.num_folds must be at least 2 for out-of-fold routing.")
+
+    indices = list(range(len(records)))
+    rng = random.Random(int(config.get("seed", 42)))
+    rng.shuffle(indices)
+    folds = [indices[offset::num_folds] for offset in range(num_folds)]
+    routing_path = Path(config["data"]["routing_path"])
+    ensure_dir(routing_path.parent)
+
+    all_routed_records = []
+    for fold_index, score_indices in enumerate(folds):
+        score_index_set = set(score_indices)
+        train_records = [records[index] for index in indices if index not in score_index_set]
+        score_records = [records[index] for index in score_indices]
+
+        fold_config = deepcopy(dict(config))
+        fold_checkpoint_dir = Path(config["outputs"]["checkpoint_dir"]) / "routing_oof" / f"fold_{fold_index + 1}"
+        fold_log_dir = Path(config["outputs"]["log_dir"]) / "routing_oof" / f"fold_{fold_index + 1}"
+        ensure_dir(fold_checkpoint_dir)
+        ensure_dir(fold_log_dir)
+        fold_config["outputs"]["checkpoint_dir"] = str(fold_checkpoint_dir)
+        fold_config["outputs"]["log_dir"] = str(fold_log_dir)
+
+        fold_train_dataset = FactVerificationDataset(
+            records=train_records,
+            label_to_id=label_to_id,
+            id_to_label=id_to_label,
+        )
+        fold_score_dataset = FactVerificationDataset(
+            records=score_records,
+            label_to_id=label_to_id,
+            id_to_label=id_to_label,
+        )
+
+        shortcut_loader = build_dataloader(fold_config, fold_train_dataset, shortcut_collator, shuffle=True)
+        shortcut_val_loader = build_dataloader(fold_config, fold_train_dataset, shortcut_collator, shuffle=False)
+        grounded_loader = build_dataloader(fold_config, fold_train_dataset, grounded_collator, shuffle=True)
+        grounded_val_loader = build_dataloader(fold_config, fold_train_dataset, grounded_collator, shuffle=False)
+
+        shortcut_model = build_shortcut_model(fold_config)
+        shortcut_config = deepcopy(fold_config)
+        shortcut_config["training"]["epochs"] = int(
+            routing_cfg.get(
+                "shortcut_epochs",
+                config.get("warmup", {}).get("shortcut_epochs", shortcut_config["training"]["epochs"]),
+            )
+        )
+        shortcut_trainer = WarmupTrainer(
+            config=shortcut_config,
+            model=shortcut_model,
+            train_loader=shortcut_loader,
+            val_loader=shortcut_val_loader,
+            device=device,
+            id_to_label=id_to_label,
+            checkpoint_dir=str(fold_checkpoint_dir),
+            log_dir=str(fold_log_dir),
+        )
+        shortcut_ckpt = shortcut_trainer.train_shortcut()
+        load_model_state(shortcut_model, shortcut_ckpt, ["model_state", "shortcut_model_state"], map_location=device)
+
+        grounded_model = build_grounded_model(fold_config)
+        grounded_config = deepcopy(fold_config)
+        grounded_config["training"]["epochs"] = int(
+            routing_cfg.get(
+                "grounded_epochs",
+                config.get("warmup", {}).get("grounded_epochs", grounded_config["training"]["epochs"]),
+            )
+        )
+        grounded_trainer = WarmupTrainer(
+            config=grounded_config,
+            model=grounded_model,
+            train_loader=grounded_loader,
+            val_loader=grounded_val_loader,
+            device=device,
+            id_to_label=id_to_label,
+            checkpoint_dir=str(fold_checkpoint_dir),
+            log_dir=str(fold_log_dir),
+        )
+        grounded_ckpt = grounded_trainer.train_grounded()
+        load_model_state(grounded_model, grounded_ckpt, ["model_state", "grounded_model_state"], map_location=device)
+
+        score_loader = build_dataloader(fold_config, fold_score_dataset, joint_collator, shuffle=False)
+        fold_path = routing_path.with_name(f"{routing_path.stem}.fold{fold_index + 1}{routing_path.suffix}")
+        routed = run_routing(
+            shortcut_model=shortcut_model.to(device),
+            grounded_model=grounded_model.to(device),
+            dataloader=score_loader,
+            device=device,
+            routing_config=routing_cfg,
+            output_path=str(fold_path),
+        )
+        for record in routed:
+            record["fold_id"] = fold_index + 1
+            record["routing_estimation"] = "out_of_fold"
+        all_routed_records.extend(routed)
+
+    all_routed_records.sort(key=lambda record: str(record["id"]))
+    write_jsonl(routing_path, all_routed_records)
+    write_json(str(routing_path.with_suffix(".stats.json")), summarize_groups(all_routed_records))
 
 
 def main() -> None:
@@ -314,17 +462,18 @@ def main() -> None:
     print(f"Using device: {device}")
 
     if args.mode == "warmup_shortcut":
+        warmup_config = config_with_warmup_epochs(config, "shortcut")
         train_dataset = build_dataset(config, "train", label_to_id, id_to_label)
         val_dataset = build_dataset(config, "val", label_to_id, id_to_label)
         print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
-        train_loader = build_dataloader(config, train_dataset, shortcut_collator, shuffle=True)
-        val_loader = build_dataloader(config, val_dataset, shortcut_collator, shuffle=False)
+        train_loader = build_dataloader(warmup_config, train_dataset, shortcut_collator, shuffle=True)
+        val_loader = build_dataloader(warmup_config, val_dataset, shortcut_collator, shuffle=False)
         print("DataLoaders built.")
 
-        shortcut_model = build_shortcut_model(config)
+        shortcut_model = build_shortcut_model(warmup_config)
         print(f"Shortcut model built.")
         trainer = WarmupTrainer(
-            config=config,
+            config=warmup_config,
             model=shortcut_model,
             train_loader=train_loader,
             val_loader=val_loader,
@@ -337,17 +486,18 @@ def main() -> None:
         return
 
     if args.mode == "warmup_grounded":
+        warmup_config = config_with_warmup_epochs(config, "grounded")
         train_dataset = build_dataset(config, "train", label_to_id, id_to_label)
         val_dataset = build_dataset(config, "val", label_to_id, id_to_label)
         print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
-        train_loader = build_dataloader(config, train_dataset, grounded_collator, shuffle=True)
-        val_loader = build_dataloader(config, val_dataset, grounded_collator, shuffle=False)
+        train_loader = build_dataloader(warmup_config, train_dataset, grounded_collator, shuffle=True)
+        val_loader = build_dataloader(warmup_config, val_dataset, grounded_collator, shuffle=False)
         print("DataLoaders built.")
 
-        grounded_model = build_grounded_model(config)
+        grounded_model = build_grounded_model(warmup_config)
         print(f"Grounded model built.")
         trainer = WarmupTrainer(
-            config=config,
+            config=warmup_config,
             model=grounded_model,
             train_loader=train_loader,
             val_loader=val_loader,
@@ -361,6 +511,19 @@ def main() -> None:
 
     if args.mode == "routing":
         train_dataset = build_dataset(config, "train", label_to_id, id_to_label)
+        if str(config.get("routing", {}).get("estimation", "checkpoint")).lower() == "out_of_fold":
+            run_out_of_fold_routing(
+                config=config,
+                records=train_dataset.records,
+                label_to_id=label_to_id,
+                id_to_label=id_to_label,
+                shortcut_collator=shortcut_collator,
+                grounded_collator=grounded_collator,
+                joint_collator=joint_collator,
+                device=device,
+            )
+            return
+
         dataloader = build_dataloader(config, train_dataset, joint_collator, shuffle=False)
         print("DataLoader built.")
 
@@ -503,12 +666,17 @@ def main() -> None:
             )
             shortcut_loaded = True
 
+    inference_cfg = config.get("inference", {})
+    fusion_method = str(inference_cfg.get("fusion_method", "head")).strip().lower()
+    if fusion_method in {"probability_average", "average", "prob_average"}:
+        fusion_head = None
+
     fusion_requested = bool(config["model"].get("use_fusion", False)) and fusion_head is not None
-    if fusion_requested and not fusion_loaded:
+    if fusion_requested and not fusion_loaded and str(inference_cfg.get("branch", "grounded")).lower() == "fusion":
         raise ValueError(
             "Evaluation config requests model.use_fusion=true, but no trained fusion_head_state was loaded. "
             f"Checkpoint checked: {eval_ckpt}. Please rerun remix training with configs/remix.yaml "
-            "or evaluate with configs/ablation_no_fusion.yaml."
+            "or set inference.fusion_method=probability_average."
         )
 
     if not shortcut_loaded:
@@ -532,12 +700,11 @@ def main() -> None:
         device=device,
         id_to_label=id_to_label,
         evidence_placeholder=str(config["data"].get("evidence_placeholder", "[NO_EVIDENCE]")),
+        fusion_alpha=float(config.get("inference", {}).get("fusion_alpha", 0.5)),
+        routing_config=config.get("routing", {}),
+        eval_grouping=str(config.get("evaluation", {}).get("grouping", "dynamic")),
     )
-    eval_mode = (
-        "fusion"
-        if bool(config["model"].get("use_fusion", False)) and shortcut_model is not None and fusion_head is not None
-        else "grounded"
-    )
+    eval_mode = resolve_eval_mode(config, shortcut_model is not None, fusion_head)
     evaluator.run_full_evaluation(
         dataset=test_dataset,
         report_path=str(Path(config["outputs"]["prediction_dir"]) / "eval_report.json"),

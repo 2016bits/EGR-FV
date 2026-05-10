@@ -6,14 +6,17 @@ from pathlib import Path
 
 
 EXPERIMENTS = [
-    ("full_egr_fv", Path("outputs/HOVER/predictions/eval_report.json")),
-    ("two_branch_baseline", Path("outputs/predictions/ablation_two_branch/eval_report.json")),
-    ("no_batch_remix", Path("outputs/predictions/ablation_routing_only/eval_report.json")),
-    ("no_sample_weights", Path("outputs/predictions/ablation_real_remix_no_weight/eval_report.json")),
-    ("no_routing_random", Path("outputs/predictions/ablation_remix_random/eval_report.json")),
-    ("no_routing_heuristic", Path("outputs/predictions/ablation_remix_heuristic/eval_report.json")),
-    ("no_fusion", Path("outputs/predictions/ablation_no_fusion/eval_report.json")),
-    ("no_orth", Path("outputs/predictions/ablation_no_orth/eval_report.json")),
+    ("grounded_only", Path("outputs/HOVER/predictions/grounded_only/eval_report.json")),
+    ("two_branches_joint", Path("outputs/HOVER/predictions/two_branches_joint/eval_report.json")),
+    ("routing_only", Path("outputs/HOVER/predictions/routing_only/eval_report.json")),
+    ("random_remix_only", Path("outputs/HOVER/predictions/random_remix_only/eval_report.json")),
+    ("full_wo_remix", Path("outputs/HOVER/predictions/full_wo_remix/eval_report.json")),
+    ("full_wo_evidence_contrast", Path("outputs/HOVER/predictions/full_wo_evidence_contrast/eval_report.json")),
+    ("full_wo_grounded_dominant", Path("outputs/HOVER/predictions/full_wo_grounded_dominant/eval_report.json")),
+    ("full_hard_routing", Path("outputs/HOVER/predictions/full_hard_routing/eval_report.json")),
+    ("full_in_sample_routing", Path("outputs/HOVER/predictions/full_in_sample_routing/eval_report.json")),
+    ("fusion_inference", Path("outputs/HOVER/predictions/fusion_inference/eval_report.json")),
+    ("full_egr_fv_v2", Path("outputs/HOVER/predictions/full_egr_fv_v2/eval_report.json")),
 ]
 
 
@@ -29,6 +32,10 @@ def _sensitivity_drop(report: dict) -> float:
     return float(base.get("macro_f1", 0.0)) - float(remove.get("macro_f1", 0.0))
 
 
+def _analysis(report: dict, key: str) -> float:
+    return float(report.get("analysis_metrics", {}).get(key, 0.0) or 0.0)
+
+
 def main() -> None:
     rows = []
     for name, path in EXPERIMENTS:
@@ -39,7 +46,10 @@ def main() -> None:
                     "mode": "missing",
                     "accuracy": "",
                     "macro_f1": "",
-                    "evidence_drop_f1": "",
+                    "grounded_needed_f1": "",
+                    "delta_remove": "",
+                    "delta_shuffle": "",
+                    "claim_only_gap": "",
                     "report": str(path),
                 }
             )
@@ -53,12 +63,15 @@ def main() -> None:
                 "mode": report["base"]["mode"],
                 "accuracy": f"{_metric(report, 'accuracy'):.6f}",
                 "macro_f1": f"{_metric(report, 'macro_f1'):.6f}",
-                "evidence_drop_f1": f"{_sensitivity_drop(report):.6f}",
+                "grounded_needed_f1": f"{_analysis(report, 'grounded_needed_macro_f1'):.6f}",
+                "delta_remove": f"{_analysis(report, 'delta_remove'):.6f}",
+                "delta_shuffle": f"{_analysis(report, 'delta_shuffle'):.6f}",
+                "claim_only_gap": f"{_analysis(report, 'claim_only_gap'):.6f}",
                 "report": str(path),
             }
         )
 
-    output_path = Path("outputs/predictions/ablation_summary.csv")
+    output_path = Path("outputs/HOVER/predictions/ablation_summary.csv")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
@@ -66,11 +79,12 @@ def main() -> None:
         writer.writerows(rows)
 
     print(f"Wrote {output_path}")
-    print("experiment,mode,accuracy,macro_f1,evidence_drop_f1")
+    print("experiment,mode,accuracy,macro_f1,grounded_needed_f1,delta_remove,delta_shuffle,claim_only_gap")
     for row in rows:
         print(
             f"{row['experiment']},{row['mode']},{row['accuracy']},"
-            f"{row['macro_f1']},{row['evidence_drop_f1']}"
+            f"{row['macro_f1']},{row['grounded_needed_f1']},"
+            f"{row['delta_remove']},{row['delta_shuffle']},{row['claim_only_gap']}"
         )
 
 

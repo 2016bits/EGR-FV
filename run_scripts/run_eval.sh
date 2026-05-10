@@ -1,5 +1,5 @@
 #!/bin/sh
-# set -eu
+set -eu
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 . "$SCRIPT_DIR/common.sh"
@@ -9,13 +9,19 @@ cd "$REPO_ROOT"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-7}"
 export PYTHON_BIN="${PYTHON_BIN:-$(resolve_python_bin)}"
 
-"$PYTHON_BIN" -m src.main --config configs/remix.yaml --mode eval
-"$PYTHON_BIN" -m src.main --config configs/ablation_two_branch.yaml --mode eval
-"$PYTHON_BIN" -m src.main --config configs/ablation_routing_only.yaml --mode eval
-"$PYTHON_BIN" -m src.main --config configs/ablation_real_remix_no_weight.yaml --mode eval
-"$PYTHON_BIN" -m src.main --config configs/ablation_remix_random.yaml --mode eval
-"$PYTHON_BIN" -m src.main --config configs/ablation_remix_heuristic.yaml --mode eval
-"$PYTHON_BIN" -m src.main --config configs/ablation_no_fusion.yaml --mode eval
-"$PYTHON_BIN" -m src.main --config configs/ablation_no_orth.yaml --mode eval
+for config in \
+  configs/ablation_grounded_only.yaml \
+  configs/ablation_two_branch.yaml \
+  configs/ablation_routing_only.yaml \
+  configs/ablation_random_remix_only.yaml \
+  configs/ablation_full_wo_remix.yaml \
+  configs/ablation_full_wo_evidence_contrast.yaml \
+  configs/ablation_full_wo_grounded_dominant.yaml \
+  configs/ablation_full_hard_routing.yaml \
+  configs/ablation_full_in_sample_routing.yaml \
+  configs/ablation_fusion_inference.yaml \
+  configs/remix.yaml; do
+  "$PYTHON_BIN" -m src.main --config "$config" --mode eval
+done
 
 "$PYTHON_BIN" scripts/summarize_ablation_results.py

@@ -4,11 +4,18 @@ sh run_scripts/run_warmup_shortcut.sh
 sh run_scripts/run_warmup_grounded.sh
 
 sh run_scripts/run_routing.sh
-sh run_scripts/run_remix.sh
-sh run_scripts/run_ablation_two_branch.sh
-sh run_scripts/run_ablation_routing_only.sh
-sh run_scripts/run_ablation_real_remix_no_weight.sh
-sh run_scripts/run_ablation_remix_random.sh
-sh run_scripts/run_ablation_remix_heuristic.sh
-sh run_scripts/run_ablation_no_fusion.sh
-sh run_scripts/run_ablation_no_orth.sh
+CONFIG=configs/remix.yaml sh run_scripts/run_remix.sh
+CONFIG=configs/ablation_two_branch.yaml sh run_scripts/run_remix.sh
+CONFIG=configs/ablation_routing_only.yaml sh run_scripts/run_remix.sh
+CONFIG=configs/ablation_random_remix_only.yaml sh run_scripts/run_remix.sh
+CONFIG=configs/ablation_full_wo_remix.yaml sh run_scripts/run_remix.sh
+CONFIG=configs/ablation_full_wo_evidence_contrast.yaml sh run_scripts/run_remix.sh
+CONFIG=configs/ablation_full_wo_grounded_dominant.yaml sh run_scripts/run_remix.sh
+
+CONFIG=configs/ablation_full_hard_routing.yaml sh run_scripts/run_routing.sh
+CONFIG=configs/ablation_full_hard_routing.yaml sh run_scripts/run_remix.sh
+
+CONFIG=configs/ablation_full_in_sample_routing.yaml sh run_scripts/run_routing.sh
+CONFIG=configs/ablation_full_in_sample_routing.yaml sh run_scripts/run_remix.sh
+
+sh run_scripts/run_eval.sh

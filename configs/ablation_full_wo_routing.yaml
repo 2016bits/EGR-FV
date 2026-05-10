@@ -1,0 +1,25 @@
+base: default.yaml
+
+experiment:
+  name: full_wo_routing
+  mode: full_wo_routing
+  pseudo_group_strategy: random
+  uniform_sample_weights: true
+
+model:
+  use_fusion: false
+
+loss:
+  use_grounded_dominant: false
+  use_evidence_contrast: true
+
+checkpoints:
+  remix: outputs/HOVER/checkpoints/full_wo_routing/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/HOVER/checkpoints/full_wo_routing
+  log_dir: outputs/HOVER/logs/full_wo_routing
+  prediction_dir: outputs/HOVER/predictions/full_wo_routing
+
+inference:
+  branch: grounded

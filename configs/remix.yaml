@@ -1,53 +1,46 @@
 base: default.yaml
 
 experiment:
-  name: full_egr_fv
+  name: full_egr_fv_v2
   mode: full
 
 model:
-  use_fusion: true
+  use_fusion: false
 
 training:
-  epochs: 4
+  epochs: 5
 
 loss:
-  lambda_shortcut: 0.2
-  lambda_orth: 0.05
-  lambda_fusion: 1.0
-  grounded_needed_weight: 1.4
+  use_grounded_dominant: true
+  use_evidence_contrast: true
+  lambda_shortcut: 0.1
+  lambda_orth: 0.03
+  lambda_contrast: 0.2
+  grounded_needed_weight: 1.5
   hard_weight: 1.0
-  bias_easy_weight: 0.7
+  bias_easy_weight: 1.0
 
 routing:
+  estimation: out_of_fold
+  strategy: soft_evidence_necessity
+  stratified_strategy: soft_evidence_necessity
+  sample_weight_source: necessity
   group_weights:
-    bias_easy: 0.7
-    grounded_needed: 1.4
+    bias_easy: 1.0
+    grounded_needed: 1.5
     hard: 1.0
 
 remix:
+  type: distribution_preserving
   schedule: fixed_ratio
-  batch_ratio:
-    bias: 0.1
-    grounded: 0.35
-    mixed: 0.55
-  mixed_ratio:
-    bias_easy: 0.2
-    grounded_needed: 0.4
-    hard: 0.4
-  loss_weights:
-    random:
-      grounded: 1.0
-      shortcut: 0.2
-      orth: 1.0
-    bias:
-      grounded: 0.8
-      shortcut: 0.25
-      orth: 0.0
-    grounded:
-      grounded: 1.25
-      shortcut: 0.15
-      orth: 1.0
-    mixed:
-      grounded: 1.0
-      shortcut: 0.2
-      orth: 1.0
+  distribution_preserving_ratio:
+    original: 0.50
+    grounded_needed: 0.30
+    hard: 0.15
+    bias_easy: 0.05
+
+inference:
+  branch: grounded
+
+outputs:
+  prediction_dir: outputs/HOVER/predictions/full_egr_fv_v2

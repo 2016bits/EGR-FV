@@ -10,10 +10,16 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm.auto import tqdm
 from transformers import get_linear_schedule_with_warmup
 
-from src.data.remix_sampler import RemixBatchScheduler
-from src.models.losses import cross_entropy_loss, orthogonality_loss, weighted_cross_entropy
+from src.data.remix_sampler import DistributionPreservingBatchSampler, RemixBatchScheduler
+from src.models.losses import evidence_contrastive_loss, orthogonality_loss, weighted_cross_entropy
 from src.trainers.evaluator import Evaluator
-from src.utils.experiments import experiment_mode, uses_batch_remix, uses_uniform_sample_weights
+from src.utils.experiments import (
+    experiment_mode,
+    uses_batch_remix,
+    uses_evidence_contrast,
+    uses_grounded_dominant_objective,
+    uses_uniform_sample_weights,
+)
 from src.utils.io import save_torch_checkpoint
 from src.utils.logger import CSVLogger
 
@@ -58,6 +64,23 @@ class RemixTrainer:
             shuffle=shuffle if sampler is None else False,
             sampler=sampler,
             num_workers=num_workers,
+            collate_fn=self.joint_collator,
+        )
+
+    def _build_distribution_preserving_loader(self, steps_per_epoch: int) -> DataLoader:
+        remix_cfg = self.config["remix"]
+        batch_size = int(self.config["training"]["batch_size"])
+        sampler = DistributionPreservingBatchSampler(
+            records=self.train_dataset.records,
+            batch_size=batch_size,
+            ratios=remix_cfg.get("distribution_preserving_ratio"),
+            steps_per_epoch=steps_per_epoch,
+            seed=int(self.config.get("seed", 42)),
+        )
+        return DataLoader(
+            self.train_dataset,
+            batch_sampler=sampler,
+            num_workers=int(self.config["data"].get("num_workers", 0)),
             collate_fn=self.joint_collator,
         )
 
@@ -131,7 +154,21 @@ class RemixTrainer:
             device=self.device,
             id_to_label=self.id_to_label,
             evidence_placeholder=str(self.config["data"].get("evidence_placeholder", "[NO_EVIDENCE]")),
+            fusion_alpha=float(self.config.get("inference", {}).get("fusion_alpha", 0.5)),
+            routing_config=self.config.get("routing", {}),
+            eval_grouping=str(self.config.get("evaluation", {}).get("grouping", "dynamic")),
         )
+
+    def _move_grounded_texts(self, claims: list[str], evidences: list[str]) -> Dict[str, torch.Tensor]:
+        return {
+            key: value.to(self.device)
+            for key, value in self.grounded_collator._encode_grounded(claims, evidences).items()
+        }
+
+    def _rotated_evidence(self, evidences: list[str]) -> list[str]:
+        if len(evidences) <= 1:
+            return [str(self.config["data"].get("evidence_placeholder", "[NO_EVIDENCE]")) for _ in evidences]
+        return evidences[1:] + evidences[:1]
 
     def train(self) -> str:
         training_cfg = self.config["training"]
@@ -140,6 +177,8 @@ class RemixTrainer:
         mode = experiment_mode(self.config)
         batch_remix_enabled = uses_batch_remix(self.config)
         uniform_sample_weights = uses_uniform_sample_weights(self.config)
+        grounded_dominant_enabled = uses_grounded_dominant_objective(self.config)
+        contrast_enabled = uses_evidence_contrast(self.config)
         num_epochs = int(training_cfg["epochs"])
         lr = float(training_cfg["lr"])
         weight_decay = float(training_cfg.get("weight_decay", 0.0))
@@ -147,42 +186,54 @@ class RemixTrainer:
         max_grad_norm = float(training_cfg.get("max_grad_norm", 1.0))
         lambda_shortcut = float(loss_cfg.get("lambda_shortcut", 0.3))
         lambda_orth = float(loss_cfg.get("lambda_orth", 0.0))
+        lambda_contrast = float(loss_cfg.get("lambda_contrast", 0.0))
+        contrast_margin = float(loss_cfg.get("contrast_margin", 0.3))
+        null_kl_gamma = float(loss_cfg.get("null_kl_gamma", 0.1))
         fusion_weight = float(loss_cfg.get("lambda_fusion", 0.5))
         use_fusion = bool(self.config["model"].get("use_fusion", False)) and self.fusion_head is not None
 
         plain_loader = None
         scheduler = None
+        distribution_loader = None
+        distribution_iterator = None
         if batch_remix_enabled:
-            bias_dataset = self.train_dataset.subset({"bias_easy"})
-            grounded_dataset = self.train_dataset.subset({"grounded_needed"})
-            mixed_sampler = self._build_mixed_sampler()
-            bias_sampler = self._build_balanced_sampler(bias_dataset)
-            grounded_sampler = self._build_balanced_sampler(grounded_dataset)
+            if str(remix_cfg.get("type", "")).lower() == "distribution_preserving":
+                batch_size = int(training_cfg["batch_size"])
+                default_steps_per_epoch = max(1, (len(self.train_dataset) + batch_size - 1) // batch_size)
+                steps_per_epoch = int(remix_cfg.get("steps_per_epoch", default_steps_per_epoch))
+                distribution_loader = self._build_distribution_preserving_loader(steps_per_epoch)
+            else:
+                bias_dataset = self.train_dataset.subset({"bias_easy"})
+                grounded_dataset = self.train_dataset.subset({"grounded_needed"})
+                mixed_sampler = self._build_mixed_sampler()
+                bias_sampler = self._build_balanced_sampler(bias_dataset)
+                grounded_sampler = self._build_balanced_sampler(grounded_dataset)
 
-            bias_loader = (
-                self._build_loader(bias_dataset, shuffle=bias_sampler is None, sampler=bias_sampler)
-                if len(bias_dataset)
-                else None
-            )
-            grounded_loader = (
-                self._build_loader(grounded_dataset, shuffle=grounded_sampler is None, sampler=grounded_sampler)
-                if len(grounded_dataset)
-                else None
-            )
-            mixed_loader = self._build_loader(self.train_dataset, sampler=mixed_sampler) if len(self.train_dataset) else None
+                bias_loader = (
+                    self._build_loader(bias_dataset, shuffle=bias_sampler is None, sampler=bias_sampler)
+                    if len(bias_dataset)
+                    else None
+                )
+                grounded_loader = (
+                    self._build_loader(grounded_dataset, shuffle=grounded_sampler is None, sampler=grounded_sampler)
+                    if len(grounded_dataset)
+                    else None
+                )
+                mixed_loader = self._build_loader(self.train_dataset, sampler=mixed_sampler) if len(self.train_dataset) else None
 
-            scheduler = RemixBatchScheduler(
-                bias_loader=bias_loader,
-                grounded_loader=grounded_loader,
-                mixed_loader=mixed_loader,
-                schedule_type=str(remix_cfg.get("schedule", "alternating")),
-                fixed_ratio=remix_cfg.get("batch_ratio"),
-                max_epochs=num_epochs,
-                seed=int(self.config.get("seed", 42)),
-            )
-            default_steps_per_epoch = max(
-                len(loader) for loader in [bias_loader, grounded_loader, mixed_loader] if loader is not None
-            )
+                scheduler = RemixBatchScheduler(
+                    bias_loader=bias_loader,
+                    grounded_loader=grounded_loader,
+                    mixed_loader=mixed_loader,
+                    schedule_type=str(remix_cfg.get("schedule", "alternating")),
+                    fixed_ratio=remix_cfg.get("batch_ratio"),
+                    max_epochs=num_epochs,
+                    seed=int(self.config.get("seed", 42)),
+                )
+                default_steps_per_epoch = max(
+                    len(loader) for loader in [bias_loader, grounded_loader, mixed_loader] if loader is not None
+                )
+                steps_per_epoch = int(remix_cfg.get("steps_per_epoch", default_steps_per_epoch))
         else:
             plain_sampler = self._build_balanced_sampler(self.train_dataset)
             plain_loader = self._build_loader(
@@ -191,8 +242,7 @@ class RemixTrainer:
                 sampler=plain_sampler,
             )
             default_steps_per_epoch = len(plain_loader)
-
-        steps_per_epoch = int(remix_cfg.get("steps_per_epoch", default_steps_per_epoch))
+            steps_per_epoch = int(remix_cfg.get("steps_per_epoch", default_steps_per_epoch))
 
         parameters = list(self.shortcut_model.parameters()) + list(self.grounded_model.parameters())
         if self.fusion_head is not None:
@@ -221,11 +271,22 @@ class RemixTrainer:
                 "loss_grounded": 0.0,
                 "loss_orth": 0.0,
                 "loss_fusion": 0.0,
+                "loss_contrast": 0.0,
+                "loss_contrast_hinge": 0.0,
+                "loss_contrast_null": 0.0,
             }
             plain_iterator = iter(plain_loader) if plain_loader is not None else None
+            distribution_iterator = iter(distribution_loader) if distribution_loader is not None else None
             progress = tqdm(range(steps_per_epoch), desc=f"{mode}:epoch{epoch + 1}", leave=False)
             for global_step in progress:
-                if scheduler is not None:
+                if distribution_iterator is not None:
+                    batch_type = "distribution_preserving"
+                    try:
+                        batch = next(distribution_iterator)
+                    except StopIteration:
+                        distribution_iterator = iter(distribution_loader)
+                        batch = next(distribution_iterator)
+                elif scheduler is not None:
                     batch_type, batch = scheduler.next_batch(global_step=global_step, epoch=epoch)
                 else:
                     batch_type = "random"
@@ -238,17 +299,24 @@ class RemixTrainer:
                 shortcut_inputs = {key: value.to(self.device) for key, value in batch["shortcut_inputs"].items()}
                 grounded_inputs = {key: value.to(self.device) for key, value in batch["grounded_inputs"].items()}
                 labels = batch["labels"].to(self.device)
-                sample_weights = batch["weights"].to(self.device)
-                if uniform_sample_weights:
-                    sample_weights = torch.ones_like(sample_weights)
+                grounded_weights = batch["grounded_loss_weights"].to(self.device)
+                shortcut_weights = batch["shortcut_loss_weights"].to(self.device)
+                if uniform_sample_weights or not grounded_dominant_enabled:
+                    grounded_weights = torch.ones_like(grounded_weights)
+                    shortcut_weights = torch.ones_like(shortcut_weights)
 
                 shortcut_outputs = self.shortcut_model(**shortcut_inputs)
                 grounded_outputs = self.grounded_model(**grounded_inputs)
 
-                loss_s = cross_entropy_loss(shortcut_outputs["logits"], labels)
-                loss_g = weighted_cross_entropy(grounded_outputs["logits"], labels, sample_weights)
+                loss_s = weighted_cross_entropy(shortcut_outputs["logits"], labels, shortcut_weights)
+                loss_g = weighted_cross_entropy(grounded_outputs["logits"], labels, grounded_weights)
                 loss_o = orthogonality_loss(shortcut_outputs["hidden"], grounded_outputs["hidden"])
                 loss_f = torch.tensor(0.0, device=self.device)
+                loss_ctr = torch.tensor(0.0, device=self.device)
+                contrast_parts = {
+                    "hinge": torch.tensor(0.0, device=self.device),
+                    "null_kl": torch.tensor(0.0, device=self.device),
+                }
 
                 if use_fusion:
                     fused_outputs = self.fusion_head(
@@ -257,7 +325,29 @@ class RemixTrainer:
                         shortcut_probs=shortcut_outputs["probs"],
                         grounded_probs=grounded_outputs["probs"],
                     )
-                    loss_f = weighted_cross_entropy(fused_outputs["logits"], labels, sample_weights)
+                    loss_f = weighted_cross_entropy(fused_outputs["logits"], labels, grounded_weights)
+
+                if contrast_enabled and lambda_contrast > 0:
+                    neg_inputs = self._move_grounded_texts(
+                        batch["claim_texts"],
+                        self._rotated_evidence(batch["evidence_texts"]),
+                    )
+                    null_inputs = self._move_grounded_texts(
+                        batch["claim_texts"],
+                        [str(self.config["data"].get("evidence_placeholder", "[NO_EVIDENCE]"))]
+                        * len(batch["claim_texts"]),
+                    )
+                    neg_outputs = self.grounded_model(**neg_inputs)
+                    null_outputs = self.grounded_model(**null_inputs)
+                    loss_ctr, contrast_parts = evidence_contrastive_loss(
+                        pos_logits=grounded_outputs["logits"],
+                        neg_logits=neg_outputs["logits"],
+                        null_logits=null_outputs["logits"],
+                        labels=labels,
+                        margin=contrast_margin,
+                        null_kl_gamma=null_kl_gamma,
+                        sample_weights=grounded_weights,
+                    )
 
                 grounded_coef, shortcut_coef, orth_coef = self._batch_loss_coefficients(
                     batch_type=batch_type,
@@ -269,6 +359,8 @@ class RemixTrainer:
 
                 if use_fusion:
                     total_loss = total_loss + fusion_weight * loss_f
+                if contrast_enabled:
+                    total_loss = total_loss + lambda_contrast * loss_ctr
 
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, max_grad_norm)
@@ -281,6 +373,9 @@ class RemixTrainer:
                 running["loss_grounded"] += float(loss_g.item())
                 running["loss_orth"] += float(loss_o.item())
                 running["loss_fusion"] += float(loss_f.item())
+                running["loss_contrast"] += float(loss_ctr.item())
+                running["loss_contrast_hinge"] += float(contrast_parts["hinge"].item())
+                running["loss_contrast_null"] += float(contrast_parts["null_kl"].item())
                 progress.set_postfix(batch=batch_type, loss=f"{total_loss.item():.4f}")
 
             epoch_log = {key: value / max(1, steps_per_epoch) for key, value in running.items()}

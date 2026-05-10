@@ -8,8 +8,9 @@ cd "$REPO_ROOT"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-7}"
 export PYTHON_BIN="${PYTHON_BIN:-$(resolve_python_bin)}"
+CONFIG="${CONFIG:-configs/shortcut.yaml}"
 "$PYTHON_BIN" -m src.main \
-  --config configs/shortcut.yaml \
+  --config "$CONFIG" \
   --mode warmup_shortcut
 
-echo "finish warmup shortcut training"
+echo "finish warmup shortcut training: $CONFIG"

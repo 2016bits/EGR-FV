@@ -1,0 +1,23 @@
+base: default.yaml
+
+experiment:
+  name: full_wo_remix
+  mode: full_wo_remix
+
+model:
+  use_fusion: false
+
+loss:
+  use_grounded_dominant: true
+  use_evidence_contrast: true
+
+checkpoints:
+  remix: outputs/HOVER/checkpoints/full_wo_remix/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/HOVER/checkpoints/full_wo_remix
+  log_dir: outputs/HOVER/logs/full_wo_remix
+  prediction_dir: outputs/HOVER/predictions/full_wo_remix
+
+inference:
+  branch: grounded

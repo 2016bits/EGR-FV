@@ -1,0 +1,21 @@
+base: default.yaml
+
+experiment:
+  name: grounded_only
+  mode: grounded_only
+
+model:
+  use_fusion: false
+
+loss:
+  use_grounded_dominant: false
+  use_evidence_contrast: false
+
+checkpoints:
+  remix: ""
+
+outputs:
+  prediction_dir: outputs/HOVER/predictions/grounded_only
+
+inference:
+  branch: grounded

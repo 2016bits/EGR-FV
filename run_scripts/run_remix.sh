@@ -8,8 +8,9 @@ cd "$REPO_ROOT"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-7}"
 export PYTHON_BIN="${PYTHON_BIN:-$(resolve_python_bin)}"
+CONFIG="${CONFIG:-configs/remix.yaml}"
 "$PYTHON_BIN" -m src.main \
-  --config configs/remix.yaml \
+  --config "$CONFIG" \
   --mode remix
 
-echo "finish remix training"
+echo "finish remix training: $CONFIG"

@@ -1,0 +1,25 @@
+base: default.yaml
+
+experiment:
+  name: full_hard_routing
+  mode: full_hard_routing
+
+data:
+  routing_path: data/HOVER/routed/train_routing_hard.jsonl
+
+model:
+  use_fusion: false
+
+routing:
+  weighting: hard
+
+checkpoints:
+  remix: outputs/HOVER/checkpoints/full_hard_routing/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/HOVER/checkpoints/full_hard_routing
+  log_dir: outputs/HOVER/logs/full_hard_routing
+  prediction_dir: outputs/HOVER/predictions/full_hard_routing
+
+inference:
+  branch: grounded

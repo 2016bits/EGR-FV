@@ -8,8 +8,9 @@ cd "$REPO_ROOT"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-7}"
 export PYTHON_BIN="${PYTHON_BIN:-$(resolve_python_bin)}"
+CONFIG="${CONFIG:-configs/routing.yaml}"
 "$PYTHON_BIN" -m src.main \
-  --config configs/routing.yaml \
+  --config "$CONFIG" \
   --mode routing
 
-echo "finish routing training"
+echo "finish routing estimation: $CONFIG"

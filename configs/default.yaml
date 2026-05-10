@@ -3,7 +3,7 @@ task: fact_verification
 num_labels: 2
 
 experiment:
-  name: full_egr_fv
+  name: full_egr_fv_v2
   mode: full
   pseudo_group_strategy: random
 
@@ -29,43 +29,69 @@ model:
   use_fusion: false
 
 training:
-  epochs: 3
-  batch_size: 32
+  epochs: 5
+  batch_size: 16
   lr: 2e-5
   weight_decay: 0.01
   warmup_ratio: 0.1
   max_grad_norm: 1.0
 
+warmup:
+  grounded_epochs: 2
+  shortcut_epochs: 2
+  lr: 2e-5
+
 loss:
-  lambda_shortcut: 0.3
-  lambda_orth: 0.0
+  use_grounded_dominant: true
+  use_evidence_contrast: true
+  alpha_grounded_weight: 0.5
+  beta_shortcut_gate: 1.0
+  lambda_shortcut: 0.1
+  lambda_orth: 0.03
   lambda_fusion: 0.5
+  lambda_contrast: 0.2
+  contrast_margin: 0.3
+  null_kl_gamma: 0.1
   grounded_needed_weight: 1.5
   hard_weight: 1.0
-  bias_easy_weight: 0.5
+  bias_easy_weight: 1.0
 
 routing:
-  strategy: score_based
+  estimation: out_of_fold
+  num_folds: 5
+  strategy: soft_evidence_necessity
   stratify_by_label: true
-  stratified_strategy: score_based
+  stratified_strategy: soft_evidence_necessity
+  score_type: soft_evidence_necessity
+  grounded_needed_threshold: 0.7
+  bias_easy_threshold: 0.3
+  alpha_grounded_weight: 0.5
+  beta_shortcut_gate: 1.0
+  sample_weight_source: necessity
   tau_shortcut_high: 0.8
   tau_disagreement_low: 0.1
   top_pct: 0.3
   bottom_pct: 0.3
   group_weights:
-    bias_easy: 0.5
+    bias_easy: 1.0
     grounded_needed: 1.5
     hard: 1.0
   necessity_weights:
-    grounded_beats_shortcut: 1.0
-    shortcut_trap: 0.5
-    disagreement: 0.5
-    uncertainty: 0.25
+    grounded_correct: 0.4
+    shortcut_wrong: 0.3
+    disagreement: 0.2
+    evidence_length: 0.1
 
 remix:
-  schedule: alternating
+  type: distribution_preserving
+  schedule: fixed_ratio
   batch_types: [bias, grounded, mixed]
-  label_balance: true
+  label_balance: false
+  distribution_preserving_ratio:
+    original: 0.50
+    grounded_needed: 0.30
+    hard: 0.15
+    bias_easy: 0.05
   loss_weights:
     random:
       grounded: 1.0
@@ -91,6 +117,14 @@ remix:
     bias_easy: 0.3
     grounded_needed: 0.4
     hard: 0.3
+
+inference:
+  branch: grounded
+  fusion_alpha: 0.5
+  fusion_method: probability_average
+
+evaluation:
+  grouping: dynamic
 
 checkpoints:
   shortcut: outputs/HOVER/checkpoints/shortcut_best.pt

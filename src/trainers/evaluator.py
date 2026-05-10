@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from src.data.dataset import FactVerificationDataset
-from src.data.routing import compute_kl_disagreement
+from src.data.routing import compute_kl_disagreement, compute_necessity_score, evidence_length_score
 from src.utils.io import write_json, write_jsonl
 from src.utils.metrics import (
     classification_metrics,
@@ -33,6 +33,9 @@ class Evaluator:
         device: torch.device,
         id_to_label: Mapping[int, str],
         evidence_placeholder: str = "[NO_EVIDENCE]",
+        fusion_alpha: float = 0.5,
+        routing_config: Mapping[str, Any] | None = None,
+        eval_grouping: str = "record",
     ) -> None:
         self.shortcut_model = shortcut_model
         self.grounded_model = grounded_model
@@ -45,6 +48,9 @@ class Evaluator:
         self.device = device
         self.id_to_label = dict(id_to_label)
         self.evidence_placeholder = evidence_placeholder
+        self.fusion_alpha = fusion_alpha
+        self.routing_config = dict(routing_config or {})
+        self.eval_grouping = eval_grouping
 
     def _build_loader(self, dataset: FactVerificationDataset, mode: str) -> DataLoader:
         if mode == "shortcut":
@@ -63,6 +69,60 @@ class Evaluator:
 
     def _move_inputs(self, inputs: Mapping[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         return {key: value.to(self.device) for key, value in inputs.items()}
+
+    def _eval_group(
+        self,
+        default_group: str,
+        index: int,
+        batch: Mapping[str, Any],
+        label_id: int,
+        shortcut_probs: torch.Tensor | None,
+        grounded_probs: torch.Tensor | None,
+        disagreement: float | None,
+    ) -> tuple[str, float | None]:
+        if (
+            self.eval_grouping != "dynamic"
+            or shortcut_probs is None
+            or grounded_probs is None
+            or disagreement is None
+            or label_id < 0
+        ):
+            return default_group, None
+
+        shortcut_conf, shortcut_pred = torch.max(shortcut_probs[index], dim=-1)
+        grounded_conf, grounded_pred = torch.max(grounded_probs[index], dim=-1)
+        shortcut_correct = bool(shortcut_pred.item() == label_id)
+        grounded_correct = bool(grounded_pred.item() == label_id)
+        length_score = evidence_length_score(
+            evidence_text=batch["evidence_texts"][index],
+            claim_text=batch["claim_texts"][index],
+        )
+        score = compute_necessity_score(
+            shortcut_conf=float(shortcut_conf.item()),
+            shortcut_correct=shortcut_correct,
+            grounded_conf=float(grounded_conf.item()),
+            grounded_correct=grounded_correct,
+            disagreement=disagreement,
+            evidence_length_score=length_score,
+            weights=self.routing_config.get("necessity_weights", {}),
+        )
+
+        tau_shortcut_high = float(self.routing_config.get("tau_shortcut_high", 0.8))
+        tau_disagreement_low = float(self.routing_config.get("tau_disagreement_low", 0.1))
+        grounded_threshold = float(self.routing_config.get("grounded_needed_threshold", 0.7))
+        bias_threshold = float(self.routing_config.get("bias_easy_threshold", 0.3))
+
+        if (
+            float(shortcut_conf.item()) >= tau_shortcut_high
+            and shortcut_correct
+            and disagreement <= tau_disagreement_low
+        ):
+            return "bias_easy", score
+        if score >= grounded_threshold:
+            return "grounded_needed", score
+        if score <= bias_threshold:
+            return "bias_easy", score
+        return "hard", score
 
     def evaluate_dataset(
         self,
@@ -107,15 +167,19 @@ class Evaluator:
                     if self.shortcut_model is not None:
                         shortcut_outputs = self.shortcut_model(**self._move_inputs(batch["shortcut_inputs"]))
                     if mode == "fusion":
-                        if self.fusion_head is None or shortcut_outputs is None:
-                            raise ValueError("Fusion mode requires both shortcut_model and fusion_head.")
-                        fused_outputs = self.fusion_head(
-                            shortcut_hidden=shortcut_outputs["hidden"],
-                            grounded_hidden=grounded_outputs["hidden"],
-                            shortcut_probs=shortcut_outputs["probs"],
-                            grounded_probs=grounded_outputs["probs"],
-                        )
-                        selected_probs = fused_outputs["probs"]
+                        if shortcut_outputs is None:
+                            raise ValueError("Fusion mode requires shortcut_model.")
+                        if self.fusion_head is not None:
+                            fused_outputs = self.fusion_head(
+                                shortcut_hidden=shortcut_outputs["hidden"],
+                                grounded_hidden=grounded_outputs["hidden"],
+                                shortcut_probs=shortcut_outputs["probs"],
+                                grounded_probs=grounded_outputs["probs"],
+                            )
+                            selected_probs = fused_outputs["probs"]
+                        else:
+                            alpha = max(0.0, min(1.0, self.fusion_alpha))
+                            selected_probs = alpha * grounded_outputs["probs"] + (1.0 - alpha) * shortcut_outputs["probs"]
 
                 selected_probs_cpu = selected_probs.detach().cpu()
                 predicted_ids = selected_probs_cpu.argmax(dim=-1)
@@ -138,11 +202,24 @@ class Evaluator:
                 for index, sample_id in enumerate(batch["ids"]):
                     label_id = int(batch_labels[index])
                     pred_id = int(predicted_ids[index].item())
+                    default_group = batch["groups"][index]
+                    disagreement_value = (
+                        float(disagreements_cpu[index].item()) if disagreements_cpu is not None else None
+                    )
+                    eval_group, eval_necessity_score = self._eval_group(
+                        default_group=default_group,
+                        index=index,
+                        batch=batch,
+                        label_id=label_id,
+                        shortcut_probs=shortcut_probs_cpu,
+                        grounded_probs=grounded_probs_cpu,
+                        disagreement=disagreement_value,
+                    )
                     if label_id >= 0:
                         labels.append(label_id)
                         predictions.append(pred_id)
                         probabilities.append(selected_probs_cpu[index].numpy())
-                        groups.append(batch["groups"][index])
+                        groups.append(eval_group)
                         hop_value = batch["num_hops"][index]
                         hop_groups.append(f"hop_{hop_value}" if hop_value is not None else "hop_unknown")
 
@@ -154,7 +231,8 @@ class Evaluator:
                     )
                     record = {
                         "id": sample_id,
-                        "group": batch["groups"][index],
+                        "group": eval_group,
+                        "record_group": default_group,
                         "num_hops": batch["num_hops"][index],
                         "label": self.id_to_label.get(label_id) if label_id >= 0 else None,
                         "pred_label": self.id_to_label.get(pred_id, str(pred_id)),
@@ -163,7 +241,9 @@ class Evaluator:
                         "grounded_conf": grounded_conf,
                     }
                     if disagreements_cpu is not None:
-                        record["disagreement"] = float(disagreements_cpu[index].item())
+                        record["disagreement"] = disagreement_value
+                    if eval_necessity_score is not None:
+                        record["eval_necessity_score"] = eval_necessity_score
                     prediction_records.append(record)
 
         base_metrics = classification_metrics(labels, predictions, label_names=self.id_to_label)
@@ -222,6 +302,21 @@ class Evaluator:
         if self.shortcut_model is not None:
             shortcut_report = self.evaluate_dataset(dataset, mode="shortcut")
             sensitivity["claim_only"] = shortcut_report["metrics"]
+            claim_only_f1 = float(shortcut_report["metrics"].get("macro_f1", 0.0))
+        else:
+            claim_only_f1 = 0.0
+
+        clean_f1 = float(base_report["metrics"].get("macro_f1", 0.0))
+        no_evidence_f1 = float(remove_report["metrics"].get("macro_f1", 0.0))
+        shuffled_evidence_f1 = float(shuffle_report["metrics"].get("macro_f1", 0.0))
+        sensitivity["summary"] = {
+            "clean_f1": clean_f1,
+            "no_evidence_f1": no_evidence_f1,
+            "shuffled_evidence_f1": shuffled_evidence_f1,
+            "delta_remove": clean_f1 - no_evidence_f1,
+            "delta_shuffle": clean_f1 - shuffled_evidence_f1,
+            "claim_only_gap": clean_f1 - claim_only_f1 if self.shortcut_model is not None else None,
+        }
         return sensitivity
 
     def run_full_evaluation(
@@ -243,6 +338,12 @@ class Evaluator:
                 "calibration": base_report["calibration"],
             },
             "evidence_sensitivity": sensitivity_report,
+            "analysis_metrics": {
+                "grounded_needed_macro_f1": base_report["group_metrics"]
+                .get("grounded_needed", {})
+                .get("macro_f1", 0.0),
+                **sensitivity_report.get("summary", {}),
+            },
         }
         write_json(report_path, full_report)
         return full_report

@@ -1,1707 +1,1152 @@
-# EGR-FV: Evidence-Grounded Remixing for Debiased Fact Verification
+# EGR-FV v2 主实验与消融实验设计说明
 
-> A practical implementation-oriented framework for debiased fact verification via **claim-evidence grounded learning**, with **sample decoupling**, **branch-specific optimization**, and **batch-level reassembling**.
-
----
-
-## 1. Project Goal
-
-本项目旨在实现一种**以 evidence-grounded reasoning 为核心**的事实核查训练框架，解决传统 fact verification 模型中过度依赖 **claim-only shortcut** 的问题。
-
-在标准事实核查任务中，输入通常为：
-
-- `claim`
-- `evidence`
-- `label ∈ {SUPPORTS, REFUTES, NEI}`
-
-虽然模型表面上接收 `(claim, evidence)` 作为输入，但实际训练后常常学到的是：
-
-- claim 中的表面模式
-- 实体共现偏置
-- 标签先验
-- 数据集中的 shortcut source
-
-而不是：
-
-- claim 与 evidence 的真实对齐关系
-- evidence 是否支持 / 反驳 claim
-- 证据缺失时的 NEI 判断依据
-
-因此，本项目的核心目标是：
-
-1. **显式分离 shortcut branch 与 grounded branch**
-2. **识别哪些样本更依赖 evidence**
-3. **通过样本分流和 batch 重组，改变训练梯度结构**
-4. **让 grounded branch 成为最终主导分支**
-5. **提升 evidence utilization、鲁棒性和泛化能力**
+本文档用于说明当前重新设计后的 EGR-FV v2 主实验与相应消融实验方案。设计目标是解决原实验中“消融实验效果高于主实验、实验逻辑不够合理”的问题，并让主实验更好地对应事实核查去偏任务的核心目标：**提升模型对证据的依赖，而不是仅仅提升普通分类准确率**。
 
 ---
 
-## 2. Core Intuition
+## 1. 背景与问题
 
-我们将事实核查中的模型行为拆解为两种不同能力：
-
-### 2.1 Shortcut Ability
-
-模型只根据 claim 自身的语言模式做预测：
+原实验中，主实验的总体结果为：
 
 ```text
-p_s(y | c)
+avg_acc      = 83.93
+avg_macro_f1 = 83.90
 ```
 
-这种能力可能来自：
-
-- 实体或关系模式
-- 常识偏置
-- 训练集标签统计规律
-- claim wording 的表面信号
-
-这类能力在训练初期通常学得更快，因此容易主导整体优化。
-
----
-
-### 2.2 Grounded Reasoning Ability
-
-模型通过 claim 与 evidence 的交互，真正基于证据完成判断：
+但部分消融实验结果反而更高，例如：
 
 ```text
-p_g(y | c, e)
+routing_only:  avg_acc = 87.29, avg_f1 = 86.45
+two_branches:  avg_acc = 86.74, avg_f1 = 85.91
 ```
 
-这种能力才是我们希望模型真正掌握的事实核查能力。
-
----
-
-### 2.3 Main Idea
-
-本项目借鉴 **Data Remixing** 的思想，将训练拆成两个核心阶段：
-
-#### (1) Decouple
-
-从样本角度识别：
-
-- 哪些样本容易被 shortcut branch 正确预测
-- 哪些样本需要 evidence 才能做对
-- 哪些样本属于 hard / ambiguous case
-
-#### (2) Reassemble
-
-在 batch 层面重新组织样本：
-
-- shortcut-heavy batch
-- grounded-needed batch
-- mixed batch
-
-通过这种训练组织方式，使 grounded branch 在关键样本上获得更强、更稳定的学习信号。
-
----
-
-## 3. Task Definition
-
-给定一个样本：
-
-```json
-{
-  "id": "sample_001",
-  "claim": "The song recorded by Fergie that was produced by Polow da Don and was followed by Life Goes On was M.I.L.F.$.",
-  "evidence": [
-    "It was produced by Polow da Don and released as the second single from the record.",
-    "The song serves as the third single from Fergie's second studio album, following \"M.I.L.F. $\"."
-  ],
-  "label": "SUPPORTS"
-}
-```
-
-目标是训练分类器：
+这会导致主实验叙事不够稳定，因为审稿人可能会质疑：
 
 ```text
-f(claim, evidence) -> {SUPPORTS, REFUTES, NEI}
+如果只做 routing-only 或 two-branches joint 就已经更好，为什么还需要完整方法？
+```
+
+因此，新的实验设计不再只围绕 clean Acc / Macro-F1 展开，而是围绕以下目标重新组织：
+
+1. 主实验是否提升普通事实核查性能；
+2. 主实验是否更依赖 evidence；
+3. 主实验是否在 evidence-needed 样本上表现更好；
+4. routing、remix、grounded-dominant loss、evidence contrast 是否分别有贡献。
+
+---
+
+## 2. 新主实验：Full EGR-FV v2
+
+新的主实验命名为：
+
+```text
+Full EGR-FV v2
+```
+
+完整方法由以下模块组成：
+
+```text
+Full EGR-FV v2 =
+  grounded branch warm-up
++ shortcut branch warm-up
++ out-of-fold routing
++ soft evidence necessity score
++ distribution-preserving remix
++ grounded-dominant objective
++ evidence contrastive loss
++ grounded-only inference
+```
+
+核心思想是：
+
+```text
+先分别训练 grounded branch 和 shortcut branch
+→ 用二者的行为差异估计每个样本对 evidence 的需求程度
+→ 根据 evidence necessity score 调整 loss 权重和 batch 构造
+→ 最终训练一个以 grounded branch 为主导的模型
+→ 推理阶段只使用 grounded branch
+```
+
+---
+
+## 3. 主实验训练流程
+
+主实验分为五个阶段。
+
+---
+
+### Stage 0: Grounded Branch Warm-up
+
+首先训练一个标准的 claim-evidence fact verification model。
+
+输入：
+
+```text
+claim + evidence
+```
+
+输出：
+
+```text
+SUPPORTS / REFUTES / NEI
+```
+
+损失函数：
+
+```text
+L_g = CE(p_g(y | claim, evidence), y)
+```
+
+该阶段的目的有两个：
+
+1. 让 grounded branch 学会基础的证据理解能力；
+2. 为后续 routing 阶段提供 grounded confidence 和 grounded prediction。
+
+---
+
+### Stage 1: Shortcut Branch Warm-up
+
+接着训练一个 claim-only shortcut branch。
+
+输入：
+
+```text
+claim
+```
+
+不输入 evidence。
+
+损失函数：
+
+```text
+L_s = CE(p_s(y | claim), y)
+```
+
+该阶段用于显式建模数据集中的 shortcut pattern。例如：
+
+```text
+某些 claim 表述本身高度暗示标签
+某些实体、模板或词汇与标签强相关
+某些样本即使不看 evidence 也容易被正确分类
+```
+
+shortcut branch 不用于最终推理，而是用于识别哪些样本属于 bias-easy，哪些样本更需要 evidence。
+
+---
+
+### Stage 2: Out-of-Fold Routing Estimation
+
+这一阶段用于给每个训练样本计算 evidence necessity score。
+
+不建议直接用在完整训练集上训练好的模型给训练集打分，因为这可能导致 routing 结果过拟合训练集。
+
+推荐使用 K-fold out-of-fold routing。
+
+例如使用 5-fold：
+
+```text
+fold 1: train on D2+D3+D4+D5, score D1
+fold 2: train on D1+D3+D4+D5, score D2
+fold 3: train on D1+D2+D4+D5, score D3
+fold 4: train on D1+D2+D3+D5, score D4
+fold 5: train on D1+D2+D3+D4, score D5
+```
+
+最终，每个样本都由“没有见过它的模型”产生 routing 分数。
+
+对每个样本保存以下信息：
+
+```text
+shortcut_conf_i
+shortcut_pred_i
+shortcut_correct_i
+
+grounded_conf_i
+grounded_pred_i
+grounded_correct_i
+
+disagreement_i
+necessity_score_i
 ```
 
 其中：
 
-- `SUPPORTS`：evidence 支持 claim
-- `REFUTES`：evidence 反驳 claim
-- `NEI`：evidence 不足以判断
+```text
+shortcut_conf_i = max p_s(y | claim_i)
+grounded_conf_i = max p_g(y | claim_i, evidence_i)
+```
+
+`disagreement_i` 可以使用预测是否不同，也可以使用分布差异，例如 KL divergence。
 
 ---
 
-## 4. Method Overview
+### Stage 3: Routing Policy Construction
 
-整个方法由五个核心模块组成：
-
-1. **Shortcut Branch**
-2. **Grounded Branch**
-3. **Bias / Necessity Scoring**
-4. **Sample Routing**
-5. **Batch Reassembling + Debiased Optimization**
-
-整体流程如下：
+Stage 2 得到的是原始 routing 信息。Stage 3 将这些信息转化为训练时真正使用的控制信号：
 
 ```text
-Raw samples
-   ↓
-Warm-up shortcut & grounded branches
-   ↓
-Compute bias / disagreement / necessity scores
-   ↓
-Route samples into groups
-   ↓
-Reassemble batches by group
-   ↓
-Joint debiased training
-   ↓
-Grounded-dominant inference
+group label
+loss weight
+sampling priority
+shortcut loss gate
 ```
+
+#### 3.1 Evidence Necessity Score
+
+对每个样本定义连续分数：
+
+```text
+r_i ∈ [0, 1]
+```
+
+`r_i` 越大，表示该样本越需要 evidence。
+
+一个简单规则如下：
+
+```text
+if shortcut_wrong and grounded_correct:
+    r_i = 1.0
+elif shortcut_conf high and shortcut_correct:
+    r_i = 0.0
+elif shortcut_pred != grounded_pred:
+    r_i = 0.7
+else:
+    r_i = 0.5
+```
+
+也可以使用连续加权形式：
+
+```text
+r_i =
+  0.4 * grounded_correct_i
++ 0.3 * shortcut_wrong_i
++ 0.2 * disagreement_i
++ 0.1 * evidence_length_score_i
+```
+
+推荐主实验使用连续版本，避免 hard routing 引入过强噪声。
+
+#### 3.2 样本分组
+
+根据 `r_i` 将样本分为三类：
+
+```text
+if r_i >= 0.7:
+    group_i = grounded_needed
+elif r_i <= 0.3:
+    group_i = bias_easy
+else:
+    group_i = hard
+```
+
+三类样本含义如下：
+
+```text
+grounded_needed:
+  shortcut branch 容易错，但 evidence 有帮助，应重点训练 grounded branch
+
+bias_easy:
+  claim-only 即可预测，容易诱导模型使用 shortcut，应降低其训练影响
+
+hard:
+  两个分支都不稳定，正常训练
+```
+
+#### 3.3 Grounded Loss Weight
+
+对 grounded branch 使用 evidence-necessity-aware 权重：
+
+```text
+w_g(i) = 1 + α * r_i
+```
+
+例如 `α = 0.5` 时：
+
+```text
+r_i = 0.0 → w_g = 1.0
+r_i = 0.5 → w_g = 1.25
+r_i = 1.0 → w_g = 1.5
+```
+
+#### 3.4 Shortcut Loss Gate
+
+对 shortcut branch 使用 gated loss：
+
+```text
+w_s(i) = β * (1 - r_i)
+```
+
+也就是说：
+
+```text
+样本越需要 evidence，shortcut branch 的 loss 权重越小
+样本越 bias-easy，shortcut branch 的 loss 权重越大
+```
+
+这样可以避免 shortcut branch 在 grounded-needed 样本上与 grounded branch 竞争。
 
 ---
 
-## 5. Model Design
+### Stage 4: Full EGR Training
 
-## 5.1 Shortcut Branch
+最终训练阶段使用 routing-guided distribution-preserving remix 和 grounded-dominant objective。
 
-### Goal
+#### 4.1 Batch 构造
 
-只输入 claim，建模 claim-only shortcut pattern。
-
-### Input
-
-- claim
-
-### Output
-
-- `shortcut_logits`
-- `shortcut_probs`
-- `shortcut_hidden`
-
-### Typical Implementation
-
-#### Option A: BERT / RoBERTa encoder + classifier
-
-```python
-claim -> tokenizer -> encoder -> CLS -> linear -> logits_s
-```
-
-#### Option B: lightweight classifier
-
-适用于快速打分、样本分流和 warm-up。
-
-### Interface Suggestion
-
-```python
-class ShortcutModel(nn.Module):
-    def __init__(self, encoder_name: str, num_labels: int):
-        ...
-    def forward(self, input_ids, attention_mask):
-        return {
-            "logits": logits,
-            "probs": probs,
-            "hidden": hidden
-        }
-```
-
-### Expected File
+推荐 batch 构造比例：
 
 ```text
-src/models/shortcut_model.py
+50% original random samples
+30% grounded_needed samples
+15% hard samples
+5% bias_easy samples
 ```
 
----
-
-## 5.2 Grounded Branch
-
-### Goal
-
-输入 claim + evidence，学习真正的 grounded verification。
-
-### Input
-
-- claim
-- evidence
-
-### Output
-
-- `grounded_logits`
-- `grounded_probs`
-- `grounded_hidden`
-
-### Typical Implementation
-
-#### Option A: Cross-Encoder
-
-输入格式：
+例如 batch size = 16 时：
 
 ```text
-[CLS] claim [SEP] evidence [SEP]
+8 个样本：原始随机采样
+5 个样本：grounded_needed
+2 个样本：hard
+1 个样本：bias_easy
 ```
 
-优点：
+该设计比 homogeneous remix 更稳定，因为每个 batch 仍然保留一半原始训练分布。
 
-- 实现简单
-- claim-evidence token-level interaction 强
-- 适合第一版 baseline
+#### 4.2 主训练损失
 
-#### Option B: Dual Encoder + Interaction
-
-适用于长 evidence 或多证据聚合场景。
-
-### Interface Suggestion
-
-```python
-class GroundedModel(nn.Module):
-    def __init__(self, encoder_name: str, num_labels: int):
-        ...
-    def forward(self, input_ids, attention_mask):
-        return {
-            "logits": logits,
-            "probs": probs,
-            "hidden": hidden
-        }
-```
-
-### Expected File
+完整损失函数为：
 
 ```text
-src/models/grounded_model.py
-```
-
----
-
-## 5.3 Final Prediction Head
-
-建议分为两种模式：
-
-### Mode A: Grounded-only inference
-
-训练时 shortcut branch 用于辅助去偏和 routing，推理时只使用 grounded branch：
-
-```text
-ŷ = argmax p_g(y | c, e)
-```
-
-这是**推荐默认方案**。
-
-### Mode B: Gated Fusion
-
-训练 / 推理时融合两分支输出：
-
-```text
-α = sigmoid(W[h_s ; h_g])
-p = α * p_g + (1 - α) * p_s
-```
-
-但为了避免退化回 shortcut learning，建议：
-
-- 对 `α` 做 grounded 偏置初始化
-- 或对 shortcut 权重施加约束
-- 或只在训练时辅助融合，推理时仍用 grounded branch
-
-### Interface Suggestion
-
-```python
-class FusionHead(nn.Module):
-    def __init__(self, hidden_size: int, num_labels: int):
-        ...
-    def forward(self, hs, hg, ps, pg):
-        return {
-            "alpha": alpha,
-            "probs": p,
-            "logits": logits
-        }
-```
-
-### Expected File
-
-```text
-src/models/fusion_head.py
-```
-
----
-
-## 6. Sample Decoupling
-
-这是整个方法的关键。
-
-不是所有样本都应被同样对待。我们需要判断：
-
-- 哪些样本 claim-only 就够了
-- 哪些样本必须依赖 evidence
-- 哪些样本两边都难
-
----
-
-## 6.1 Why Sample Decoupling?
-
-若不做分流，所有样本统一训练时会发生：
-
-1. shortcut 分支更快收敛
-2. grounded 分支被 shortcut 学到的简单模式掩盖
-3. 难样本的训练信号太弱
-4. evidence 的贡献被整体平均掉
-
-因此必须先对样本进行结构化建模。
-
----
-
-## 6.2 Required Scores
-
-建议为每个样本缓存如下分数：
-
-### (1) Shortcut confidence
-
-```text
-b_i = max p_s(y | c_i)
-```
-
-表示 claim-only 分支对该样本的最大置信度。
-
----
-
-### (2) Shortcut correctness
-
-```text
-shortcut_correct_i = 1[argmax p_s == y]
-```
-
----
-
-### (3) Grounded confidence
-
-```text
-g_i = max p_g(y | c_i, e_i)
-```
-
----
-
-### (4) Grounded correctness
-
-```text
-grounded_correct_i = 1[argmax p_g == y]
-```
-
----
-
-### (5) Branch disagreement
-
-可选定义：
-
-#### KL divergence
-
-```text
-d_i = KL(p_g || p_s)
-```
-
-#### Cosine distance
-
-```text
-d_i = 1 - cos(z_g, z_s)
-```
-
-#### Prediction mismatch
-
-```text
-d_i = 1[argmax p_g != argmax p_s]
-```
-
-实践中可以同时缓存多个版本。
-
----
-
-### (6) Evidence necessity score
-
-建议定义一个组合分数，用于判断 evidence 是否必要：
-
-```text
-n_i = w1 * 1[p_g correct and p_s wrong]
-    + w2 * 1[shortcut high-conf but wrong]
-    + w3 * disagreement_i
-    + w4 * uncertainty_term
+L_full =
+    L_g_weighted
+  + λ_s L_s_gated
+  + λ_orth L_orth
+  + λ_ctr L_evidence_contrast
 ```
 
 其中：
 
-- `p_g correct and p_s wrong`：最强 grounded-needed 信号
-- `shortcut high-conf but wrong`：典型 shortcut trap
-- `disagreement_i`：两分支语义差异
-- `uncertainty_term`：如 grounded margin 或 entropy
-
----
-
-## 6.3 Sample Groups
-
-推荐划分为三类。
-
-### Group A: bias_easy
-
-定义特征：
-
-- shortcut 置信度高
-- shortcut 预测正确
-- grounded 与 shortcut 差异小
-
-这类样本容易强化 claim-only 偏置。
-
-#### 训练策略
-
-- 降低在 joint training 中的占比
-- 可保留给 shortcut 分支 warm-up
-- 不要让这类样本主导 grounded branch 的更新
-
----
-
-### Group B: grounded_needed
-
-定义特征：
-
-- `p_g` 正确而 `p_s` 错误
-- 或者 branch disagreement 高
-- 或 evidence necessity score 高
-
-这类样本最能体现 evidence-grounded reasoning 的价值。
-
-#### 训练策略
-
-- 在 grounded batch 中提高占比
-- 对 grounded loss 赋更高权重
-- 在 curriculum 中优先使用
-
----
-
-### Group C: hard
-
-定义特征：
-
-- 两分支都不稳定
-- 两分支都可能错误
-- 或 evidence 复杂、歧义大、语义链长
-
-#### 训练策略
-
-- 保留一定比例
-- 后期加入 mixed / hard batch
-- 用于提高鲁棒性
-
----
-
-## 6.4 Recommended Routing Rules
-
-### Rule Version 1: Simple Threshold
-
-```python
-if shortcut_conf >= tau_high and shortcut_correct and disagreement <= tau_low:
-    group = "bias_easy"
-elif grounded_correct and not shortcut_correct:
-    group = "grounded_needed"
-else:
-    group = "hard"
+```text
+L_g_weighted = w_g(i) * CE(p_g(y | claim, evidence), y)
+L_s_gated   = w_s(i) * CE(p_s(y | claim), y)
 ```
 
-### Rule Version 2: Score-based Ranking
-
-1. 计算 `necessity_score`
-2. 对全部样本排序
-3. 取：
-   - top 30% → `grounded_needed`
-   - bottom 30% → `bias_easy`
-   - middle 40% → `hard`
-
-### Rule Version 3: Hybrid Routing
-
-先用规则打标签，再用排序修正边界样本。
-
----
-
-## 6.5 Routing Cache Format
-
-建议将路由结果写入文件，避免每次训练都重复计算：
-
-```json
-{
-  "id": "sample_001",
-  "shortcut_conf": 0.91,
-  "shortcut_correct": true,
-  "grounded_conf": 0.73,
-  "grounded_correct": true,
-  "disagreement": 0.48,
-  "necessity_score": 0.77,
-  "group": "grounded_needed"
-}
-```
-
-### Expected File
+`L_orth` 用于约束 grounded representation 和 shortcut representation 尽量解耦：
 
 ```text
-data/routed/train_routing.jsonl
+L_orth = || H_g^T H_s ||^2
 ```
 
-### Expected Script
+#### 4.3 Evidence Contrastive Loss
+
+为了显式增强模型对 evidence 的依赖，构造三种输入：
 
 ```text
-src/data/routing.py
-scripts/run_routing.sh
+x_pos  = claim + gold evidence
+x_neg  = claim + shuffled / mismatched evidence
+x_null = claim + empty evidence
 ```
 
----
-
-## 7. Batch Reassembling
-
-在获得 sample groups 之后，下一步是 batch-level remix。
-
----
-
-## 7.1 Why Reassemble at Batch Level?
-
-即使我们已经知道哪些样本更需要 evidence，如果仍然随机采样训练，依然会发生：
-
-- bias_easy 样本数量更多
-- batch 平均梯度仍然偏向 shortcut
-- grounded-needed 样本信号被稀释
-
-因此必须控制每个 batch 的样本组成。
-
----
-
-## 7.2 Batch Types
-
-### 1) Bias Batch
-
-主要由 `bias_easy` 样本组成。
-
-#### Purpose
-
-- 稳定 shortcut predictor
-- 维护 shortcut branch 的可解释性
-- 为后续 routing 提供可靠分数
-
-#### Notes
-
-- 不应在此 batch 上过度强化 grounded branch
-
----
-
-### 2) Grounded Batch
-
-主要由 `grounded_needed` 样本组成。
-
-#### Purpose
-
-- 强化 evidence utilization
-- 提高 grounded reasoning
-- 提升困难验证样本的可学习性
-
-#### Notes
-
-- 这是 joint training 的核心 batch 类型
-
----
-
-### 3) Mixed Batch
-
-由三类样本按比例混合：
-
-- bias_easy
-- grounded_needed
-- hard
-
-#### Purpose
-
-- 保持分布稳定
-- 提高泛化
-- 防止训练仅对某类样本过拟合
-
----
-
-## 7.3 Recommended Remix Schedules
-
-### Schedule A: Alternating
+要求模型在正确证据下比错误证据下更容易预测正确标签：
 
 ```text
-bias -> grounded -> mixed -> bias -> grounded -> mixed
+L_ctr = max(0, m + CE(p_pos, y) - CE(p_neg, y))
 ```
 
-实现简单，适合第一版。
-
----
-
-### Schedule B: Fixed Ratio per Epoch
-
-例如：
-
-- 25% bias batch
-- 50% grounded batch
-- 25% mixed batch
-
-适合更稳定训练。
-
----
-
-### Schedule C: Curriculum
-
-#### Early stage
-
-- bias batch 较多
-- 目的是稳定 shortcut 表征与 routing 分数
-
-#### Middle stage
-
-- grounded batch 占主导
-- 开始真正强化 grounded reasoning
-
-#### Late stage
-
-- 增加 hard / mixed batch
-- 提升鲁棒性与边界样本处理能力
-
----
-
-## 7.4 Sampler Interface
-
-建议单独写一个 remix sampler：
-
-```python
-class RemixBatchScheduler:
-    def __init__(self, bias_loader, grounded_loader, mixed_loader, schedule_type="alternating"):
-        ...
-    def next_batch(self, global_step, epoch):
-        return batch_type, batch
-```
-
-### Expected File
+也可以加入 no-evidence sensitivity 项：
 
 ```text
-src/data/remix_sampler.py
+L_null = KL(p_pos || p_null)
 ```
 
----
-
-## 8. Training Objectives
-
-## 8.1 Shortcut Loss
+最终：
 
 ```text
-L_s = CE(p_s, y)
+L_evidence_contrast = L_ctr + γ L_null
 ```
-
-作用：
-
-- 学习 shortcut predictor
-- 提供 routing 所需的置信度和偏置信号
 
 ---
 
-## 8.2 Grounded Loss
+### Stage 5: Inference
+
+推理阶段只使用 grounded branch：
 
 ```text
-L_g = CE(p_g, y)
+ŷ = argmax p_g(y | claim, evidence)
 ```
 
-作用：
+shortcut branch 只用于训练阶段的 routing 和辅助约束，不参与最终预测。
 
-- 学习 claim-evidence grounded semantics
-- 作为最终主损失
+这样可以避免最终模型重新退化为 shortcut-based classifier。
 
 ---
 
-## 8.3 Weighted Grounded Loss
-
-对不同样本赋予不同权重：
-
-```text
-L_g_weighted = w_i * CE(p_g^i, y_i)
-```
-
-建议：
-
-- `grounded_needed` 样本权重大
-- `bias_easy` 样本权重小
-- `hard` 样本居中
-
-一个简单示例：
-
-```python
-if group == "grounded_needed":
-    weight = 1.5
-elif group == "hard":
-    weight = 1.0
-else:
-    weight = 0.5
-```
-
----
-
-## 8.4 Representation Disentanglement Loss
-
-为了降低 shortcut 表征对 grounded 表征的干扰，可加入解耦损失。
-
-### Option A: Cosine orthogonality
-
-```text
-L_orth = cos(h_s, h_g)^2
-```
-
-### Option B: Dot-product penalty
-
-```text
-L_orth = ||h_s^T h_g||^2
-```
-
----
-
-## 8.5 Residual Grounding Loss
-
-鼓励 grounded 分支学习 shortcut 之外的增量信息：
-
-```text
-z_res = z_g - Proj(z_s)
-```
-
-然后在 `z_res` 上做监督，或约束其携带真实标签信息。
-
-适合第二阶段扩展，不建议第一版就加太复杂。
-
----
-
-## 8.6 Calibration / Consistency Loss
-
-可选加入：
-
-- grounded prediction consistency
-- evidence dropout consistency
-- confidence calibration loss
-
-例如：
-
-```text
-L_cons = KL(p_g_full || p_g_dropout)
-```
-
----
-
-## 8.7 Total Loss
-
-推荐第一版总损失：
-
-```text
-L = L_g_weighted + λ_s * L_s + λ_o * L_orth
-```
-
-推荐默认起点：
-
-- `λ_s = 0.3`
-- `λ_o = 0.05`
-
-更保守版本：
-
-```text
-L = L_g + 0.2 * L_s
-```
-
-如果训练不稳定，可先去掉 `L_orth`。
-
-### Expected File
-
-```text
-src/models/losses.py
-```
-
----
-
-## 9. Training Pipeline
-
-建议按以下阶段实现。
-
----
-
-## 9.1 Stage 0: Data Preparation
-
-### Input format
-
-建议使用 JSONL：
-
-```json
-{"id":"1","claim":"...","evidence":["...","..."],"label":"SUPPORTS"}
-{"id":"2","claim":"...","evidence":["..."],"label":"REFUTES"}
-```
-
-### Recommended preprocessing
-
-1. 将 evidence list 合并为单段文本
-2. 保留原始 evidence list 以便后续分析
-3. 映射标签到 id：
-   - `SUPPORTS -> 0`
-   - `REFUTES -> 1`
-   - `NEI -> 2`
-
-### Expected Files
-
-```text
-src/data/dataset.py
-src/data/collator.py
-```
-
----
-
-## 9.2 Stage 1: Warm-up
-
-### Goal
-
-先分别让 shortcut 与 grounded 分支具备基础判别能力。
-
-### Recommended procedure
-
-#### Step 1
-
-单独训练 shortcut branch 若干 epoch
-
-#### Step 2
-
-单独训练 grounded branch 若干 epoch
-
-#### Step 3
-
-在验证集上保存：
-
-- `shortcut checkpoint`
-- `grounded checkpoint`
-
-### Why needed?
-
-因为若一开始就做 routing，分数会非常不稳定。
-
-### Suggested scripts
-
-```text
-scripts/run_warmup_shortcut.sh
-scripts/run_warmup_grounded.sh
-```
-
----
-
-## 9.3 Stage 2: Bias / Necessity Scoring
-
-对训练集每个样本做一次前向推理，得到：
-
-- `shortcut_conf`
-- `shortcut_pred`
-- `shortcut_correct`
-- `grounded_conf`
-- `grounded_pred`
-- `grounded_correct`
-- `disagreement`
-- `necessity_score`
-
-然后写入 routing cache。
-
-### Output
-
-```text
-data/routed/train_routing.jsonl
-```
-
----
-
-## 9.4 Stage 3: Sample Routing
-
-根据预设规则将样本映射到 group：
-
-- `bias_easy`
-- `grounded_needed`
-- `hard`
-
-建议同时输出统计信息：
-
-```json
-{
-  "num_total": 10000,
-  "num_bias_easy": 3200,
-  "num_grounded_needed": 4100,
-  "num_hard": 2700
-}
-```
-
-### Why this matters?
-
-便于观察分布是否合理。如果 `grounded_needed` 太少，说明 routing 规则可能过严。
-
----
-
-## 9.5 Stage 4: Build Reassembled Loaders
-
-使用 routing 文件构建 3 个 dataset / dataloader：
-
-- `bias_dataset`
-- `grounded_dataset`
-- `mixed_dataset`
-
-mixed_dataset 可以有两种做法：
-
-### Option A
-
-从全量训练集随机采样，但带 group-aware 权重
-
-### Option B
-
-从 3 类中按固定比例采样，比如：
-
-- 30% bias_easy
-- 40% grounded_needed
-- 30% hard
-
----
-
-## 9.6 Stage 5: Joint Debiased Training
-
-训练时同时前向：
-
-- shortcut branch
-- grounded branch
-- optional fusion head
-
-并根据 batch 类型决定损失重点。
-
-### Bias batch
-
-```python
-loss = L_s + 0.1 * L_g
-```
-
-### Grounded batch
-
-```python
-loss = 1.5 * L_g + 0.2 * L_s + λ_o * L_orth
-```
-
-### Mixed batch
-
-```python
-loss = L_g_weighted + λ_s * L_s + λ_o * L_orth
-```
-
-### Notes
-
-第一版不必过度追求复杂性，能稳定跑通最重要。
-
----
-
-## 9.7 Stage 6: Inference
-
-默认推理只使用 grounded branch：
-
-```python
-pred = grounded_model(claim, evidence)["probs"].argmax(dim=-1)
-```
-
-建议同时输出分析字段：
-
-```json
-{
-  "id": "sample_001",
-  "pred_label": "SUPPORTS",
-  "grounded_conf": 0.88,
-  "shortcut_conf": 0.74,
-  "disagreement": 0.31
-}
-```
-
-方便后续误差分析。
-
----
-
-## 10. Codebase Structure
-
-推荐如下目录结构：
-
-```text
-EGR-FV/
-├── README.md
-├── requirements.txt
-├── configs/
-│   ├── default.yaml
-│   ├── shortcut.yaml
-│   ├── grounded.yaml
-│   ├── routing.yaml
-│   └── remix.yaml
-├── data/
-│   ├── raw/
-│   ├── processed/
-│   └── routed/
-├── src/
-│   ├── models/
-│   │   ├── shortcut_model.py
-│   │   ├── grounded_model.py
-│   │   ├── fusion_head.py
-│   │   └── losses.py
-│   ├── data/
-│   │   ├── dataset.py
-│   │   ├── collator.py
-│   │   ├── routing.py
-│   │   └── remix_sampler.py
-│   ├── trainers/
-│   │   ├── warmup_trainer.py
-│   │   ├── remix_trainer.py
-│   │   └── evaluator.py
-│   ├── utils/
-│   │   ├── metrics.py
-│   │   ├── logger.py
-│   │   ├── io.py
-│   │   └── seed.py
-│   └── main.py
-├── scripts/
-│   ├── run_warmup_shortcut.sh
-│   ├── run_warmup_grounded.sh
-│   ├── run_routing.sh
-│   ├── run_remix.sh
-│   └── run_eval.sh
-└── outputs/
-    ├── checkpoints/
-    ├── logs/
-    └── predictions/
-```
-
----
-
-## 11. Config Design
-
-建议统一使用 YAML 配置。
-
-### Example: `configs/remix.yaml`
+## 4. 推荐主实验配置
 
 ```yaml
-seed: 42
-task: fact_verification
-num_labels: 3
+experiment:
+  name: full_egr_fv_v2
 
-data:
-  train_path: data/processed/train.jsonl
-  val_path: data/processed/val.jsonl
-  test_path: data/processed/test.jsonl
-  routing_path: data/routed/train_routing.jsonl
-  max_claim_len: 128
-  max_evidence_len: 384
+warmup:
+  grounded_epochs: 2
+  shortcut_epochs: 2
+  learning_rate: 2.0e-5
 
-model:
-  shortcut_encoder: roberta-base
-  grounded_encoder: roberta-base
-  hidden_size: 768
-  dropout: 0.1
-  use_fusion: false
+routing:
+  strategy: out_of_fold
+  num_folds: 5
+  score_type: soft_evidence_necessity
+  grounded_needed_threshold: 0.7
+  bias_easy_threshold: 0.3
+
+remix:
+  type: distribution_preserving
+  original_ratio: 0.50
+  grounded_needed_ratio: 0.30
+  hard_ratio: 0.15
+  bias_easy_ratio: 0.05
+
+loss:
+  alpha_grounded_weight: 0.5
+  beta_shortcut_gate: 1.0
+  lambda_shortcut: 0.1
+  lambda_orth: 0.03
+  lambda_contrast: 0.2
+  contrast_margin: 0.3
+  null_kl_gamma: 0.1
 
 training:
   epochs: 5
   batch_size: 16
-  lr: 2e-5
-  weight_decay: 0.01
+  learning_rate: 2.0e-5
   warmup_ratio: 0.1
   max_grad_norm: 1.0
 
-loss:
-  lambda_shortcut: 0.3
-  lambda_orth: 0.05
-  grounded_needed_weight: 1.5
-  hard_weight: 1.0
-  bias_easy_weight: 0.5
-
-routing:
-  tau_shortcut_high: 0.8
-  tau_disagreement_low: 0.1
-  strategy: hybrid
-
-remix:
-  schedule: alternating
-  batch_types: [bias, grounded, mixed]
-  mixed_ratio:
-    bias_easy: 0.3
-    grounded_needed: 0.4
-    hard: 0.3
+inference:
+  branch: grounded_only
 ```
 
 ---
 
-## 12. Data Module Design
+## 5. 消融实验设计原则
 
-## 12.1 Dataset
-
-建议 dataset 返回统一字段：
-
-```python
-{
-    "id": sample_id,
-    "claim_text": claim,
-    "evidence_text": evidence_text,
-    "label": label_id,
-    "group": group_name,               # optional
-    "sample_weight": weight_value      # optional
-}
-```
-
-### Responsibilities
-
-- 读取 JSONL
-- 合并 evidence 文本
-- 对标签做映射
-- 接入 routing 信息
-
----
-
-## 12.2 Collator
-
-建议根据分支类型支持两种编码方式：
-
-### Shortcut collate
-
-只编码 claim
-
-### Grounded collate
-
-编码 `(claim, evidence)`
-
-### Joint collate
-
-同时返回 shortcut 和 grounded 所需输入
-
-### Output Example
-
-```python
-{
-    "ids": [...],
-    "labels": tensor(...),
-    "shortcut_inputs": {
-        "input_ids": ...,
-        "attention_mask": ...
-    },
-    "grounded_inputs": {
-        "input_ids": ...,
-        "attention_mask": ...
-    },
-    "groups": [...],
-    "weights": ...
-}
-```
-
----
-
-## 13. Trainer Design
-
-建议分成两个 trainer。
-
----
-
-## 13.1 WarmupTrainer
-
-### Responsibilities
-
-- 支持训练 shortcut-only
-- 支持训练 grounded-only
-- 保存最佳 checkpoint
-- 输出基础验证指标
-
-### Expected File
+新的消融实验围绕以下问题设计：
 
 ```text
-src/trainers/warmup_trainer.py
+Full EGR-FV v2 的提升来自哪里？
 ```
+
+具体拆解为：
+
+1. 是否只是 grounded baseline 本身有效；
+2. 是否只是多了 shortcut branch；
+3. routing 是否有效；
+4. remix 是否有效；
+5. soft routing 是否优于 hard routing；
+6. out-of-fold routing 是否优于 in-sample routing；
+7. grounded-dominant loss 是否必要；
+8. evidence contrastive loss 是否真的增强证据依赖；
+9. grounded-only inference 是否比 fusion inference 更符合去偏目标。
 
 ---
 
-## 13.2 RemixTrainer
+## 6. 推荐消融实验列表
 
-### Responsibilities
+### B0. Grounded-only
 
-- 读取 routed samples
-- 构造 reassembled loaders
-- 按 schedule 获取 batch
-- 联合前向 shortcut / grounded
-- 计算 group-aware loss
-- 记录 batch-level 统计信息
-
-### Expected File
+基础 claim-evidence fact verification model。
 
 ```text
-src/trainers/remix_trainer.py
+输入：claim + evidence
+训练：CE loss
+推理：grounded branch
 ```
 
----
-
-## 14. Evaluation Design
-
-除了标准分类效果，还应评估 debiasing 是否真的有效。
-
----
-
-## 14.1 Standard Metrics
-
-- Accuracy
-- Macro Precision
-- Macro Recall
-- Macro F1
-- Per-label F1
-
----
-
-## 14.2 Group-wise Metrics
-
-分别在以下样本集上评估：
-
-- bias_easy
-- grounded_needed
-- hard
-
-希望看到：
-
-- grounded_needed 上明显提升
-- bias_easy 上不明显下降或可接受下降
-- hard 上逐步改善
-
----
-
-## 14.3 Evidence Sensitivity Tests
-
-### Test A: Remove evidence
-
-将 evidence 置空或替换为 `[NO_EVIDENCE]`
-
-如果 grounded model 真的使用了证据，性能应该显著下降。
-
-### Test B: Shuffle evidence
-
-将 evidence 随机打乱到别的样本
-
-若性能变化不大，说明模型可能没有真正 grounding。
-
-### Test C: Claim-only inference comparison
-
-对比：
-
-- shortcut branch
-- grounded branch
-- final predictor
-
----
-
-## 14.4 Calibration / Robustness
-
-建议额外记录：
-
-- ECE
-- Brier score
-- adversarial evidence robustness
-- OOD dataset transfer
-
-### Expected File
+损失函数：
 
 ```text
-src/trainers/evaluator.py
-src/utils/metrics.py
+L = CE(p_g(y | claim, evidence), y)
 ```
 
----
-
-## 15. Minimal Implementation Roadmap
-
-为了尽快落地，建议按以下顺序实现。
-
-### Step 1
-
-实现最基础的 grounded verifier：
-
-- `GroundedModel`
-- `Dataset`
-- `Collator`
-- `WarmupTrainer`
-
-### Step 2
-
-实现 shortcut branch：
-
-- `ShortcutModel`
-- shortcut warm-up script
-
-### Step 3
-
-实现 routing：
-
-- 读取两个 checkpoint
-- 对 train 集打分
-- 输出 `train_routing.jsonl`
-
-### Step 4
-
-实现 remix trainer：
-
-- 多 loader
-- schedule
-- weighted loss
-
-### Step 5
-
-加入 disentanglement loss / fusion head / 更复杂 routing 规则
+目的：验证 Full 是否优于普通 evidence-aware 模型。
 
 ---
 
-## 16. Pseudocode
+### B1. Two-branches Joint
 
-### 16.1 Warm-up
+保留 grounded branch 和 shortcut branch，但不使用 routing、remix 和 contrast。
+
+```text
+grounded branch: claim + evidence
+shortcut branch: claim only
+```
+
+损失函数：
+
+```text
+L = CE(p_g, y) + λ_s CE(p_s, y)
+```
+
+推理仍然只使用 grounded branch。
+
+目的：排除 Full 的提升只是因为多了一个 shortcut branch。
+
+---
+
+### B2. Routing-only
+
+使用 out-of-fold routing 和 grounded-dominant loss，但不做 remix，不加 evidence contrast。
+
+```text
+有：
+  out-of-fold routing
+  soft evidence necessity score
+  grounded weighted loss
+  shortcut gated loss
+
+无：
+  batch remix
+  evidence contrast
+```
+
+损失函数：
+
+```text
+L = w_g(i) L_g + λ_s w_s(i) L_s
+```
+
+目的：验证 sample-level routing weight 本身是否有效。
+
+---
+
+### B3. Random Remix-only
+
+不使用 learned routing，只做随机 remix。
+
+```text
+无 routing
+无 evidence necessity score
+无 group weight
+无 evidence contrast
+```
+
+将训练集随机分成若干组，并按照类似 Full 的 batch 比例进行采样。
+
+目的：验证 Full 的提升是否只是来自 batch composition 改变。
+
+---
+
+### B4. Length Remix-only
+
+不使用 learned routing，只根据 claim/evidence 长度进行启发式分组。
+
+推荐规则：
+
+```text
+if evidence_len >= 90 or evidence_len >= max(3 * claim_len, 40):
+    group = grounded_needed
+elif evidence_len <= 25 and claim_len <= 32:
+    group = bias_easy
+else:
+    group = hard
+```
+
+注意：正式消融中不能使用 label 信息进行分组。
+
+不推荐：
 
 ```python
-# train shortcut branch
-for epoch in range(num_epochs):
-    for batch in train_loader:
-        out_s = shortcut_model(**batch["shortcut_inputs"])
-        loss = ce(out_s["logits"], batch["labels"])
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
+if label == "NEI":
+    group = grounded_needed
+```
 
-# train grounded branch
-for epoch in range(num_epochs):
-    for batch in train_loader:
-        out_g = grounded_model(**batch["grounded_inputs"])
-        loss = ce(out_g["logits"], batch["labels"])
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
+因为这会变成 label-aware sampler，不是公平消融。
+
+目的：验证 learned routing 是否优于简单启发式规则。
+
+---
+
+### B5. Full w/o Remix
+
+保留 Full 的其他模块，只去掉 distribution-preserving remix。
+
+```text
+保留：
+  out-of-fold routing
+  soft evidence necessity score
+  grounded-dominant loss
+  evidence contrastive loss
+
+去掉：
+  distribution-preserving remix
+```
+
+训练 batch 使用普通 random shuffle。
+
+目的：在公平条件下验证 remix 的独立贡献。
+
+---
+
+### B6. Full w/o Routing
+
+保留 remix 框架和 contrast loss，但不使用 learned routing。
+
+可选实现：
+
+```text
+A. random routing
+B. length-only routing
+```
+
+主表建议使用 random routing，appendix 可以加入 length-only routing。
+
+目的：验证 Full 的提升是否依赖 learned routing，而不是任意采样策略。
+
+---
+
+### B7. Full w/o Evidence Contrast
+
+去掉 evidence contrastive loss，其余保持与 Full 一致。
+
+```text
+Full:
+  L = L_g_weighted + λ_s L_s_gated + λ_orth L_orth + λ_ctr L_contrast
+
+B7:
+  L = L_g_weighted + λ_s L_s_gated + λ_orth L_orth
+```
+
+目的：验证 evidence contrast 是否真的增强模型对 evidence 的依赖。
+
+预期：B7 的 clean Acc / Macro-F1 可能接近 Full，但 Full 应在证据扰动指标上更好。
+
+---
+
+### B8. Full w/o Grounded-dominant Objective
+
+保留 routing、remix 和 contrast，但把 loss 改为普通 two-branch joint loss。
+
+```text
+Full:
+  L = w_g(i)L_g + λ_s w_s(i)L_s + λ_orth L_orth + λ_ctr L_contrast
+
+B8:
+  L = L_g + λ_s L_s + λ_orth L_orth + λ_ctr L_contrast
+```
+
+也就是说：
+
+```text
+不使用 grounded loss weighting
+不使用 shortcut loss gate
+```
+
+目的：验证 grounded-dominant training objective 是否必要。
+
+---
+
+### B9. Full w/ Hard Routing
+
+将 Full 中的 continuous soft score 替换成 hard group。
+
+```text
+bias_easy        → r_i = 0
+grounded_needed → r_i = 1
+hard             → r_i = 0.5
+```
+
+或者使用固定权重：
+
+```text
+bias_easy:        w_g = 0.5, w_s = 1.0
+hard:             w_g = 1.0, w_s = 0.5
+grounded_needed:  w_g = 1.5, w_s = 0.0
+```
+
+目的：验证 soft routing 是否比 hard routing 更稳定。
+
+---
+
+### B10. Full w/ In-sample Routing
+
+保留 routing 机制，但不使用 out-of-fold。
+
+```text
+Full:
+  out-of-fold routing
+
+B10:
+  in-sample routing
+```
+
+即直接用在完整训练集上 warm-up 的模型对训练集打分。
+
+目的：验证 out-of-fold routing 是否能够减少 routing overfitting。
+
+---
+
+### B11. Full w/ Fusion Inference
+
+训练过程与 Full 一样，但推理时融合 grounded branch 和 shortcut branch。
+
+例如：
+
+```text
+p = λ p_g + (1 - λ) p_s
+```
+
+目的：验证为什么最终推理阶段选择 grounded-only inference。
+
+预期：fusion inference 可能 clean Acc 更高，但 evidence sensitivity 更差。
+
+---
+
+### B12. Shortcut-only Inference
+
+只使用 shortcut branch 进行推理。
+
+```text
+输入：claim only
+输出：p_s(y | claim)
+```
+
+目的：诊断数据集本身的 shortcut 强度。
+
+该实验不一定放主表，可以作为分析实验。
+
+---
+
+## 7. 推荐主消融表
+
+如果篇幅有限，建议主表包含以下实验：
+
+```text
+B0  Grounded-only
+B1  Two-branches Joint
+B2  Routing-only
+B3  Random Remix-only
+B5  Full w/o Remix
+B7  Full w/o Evidence Contrast
+B8  Full w/o Grounded-dominant Objective
+Full EGR-FV v2
+```
+
+对应表格：
+
+| Method                               |  Acc | Macro-F1 | Grounded-needed F1 | ΔRemove | ΔShuffle | Claim-only Gap |
+| ------------------------------------ | ---: | -------: | -----------------: | ------: | -------: | -------------: |
+| Grounded-only                        |      |          |                    |         |          |                |
+| Two-branches Joint                   |      |          |                    |         |          |                |
+| Routing-only                         |      |          |                    |         |          |                |
+| Random Remix-only                    |      |          |                    |         |          |                |
+| Full w/o Remix                       |      |          |                    |         |          |                |
+| Full w/o Evidence Contrast           |      |          |                    |         |          |                |
+| Full w/o Grounded-dominant Objective |      |          |                    |         |          |                |
+| Full EGR-FV v2                       |      |          |                    |         |          |                |
+
+---
+
+## 8. 推荐结果汇报方式
+
+不建议只汇报：
+
+```text
+Acc
+Macro-F1
+```
+
+因为去偏事实核查任务的核心不是普通分类性能，而是 evidence dependence。
+
+建议至少汇报以下指标。
+
+---
+
+### 8.1 Clean Acc / Macro-F1
+
+标准测试集上的分类性能：
+
+```text
+Acc_clean
+Macro-F1_clean
+```
+
+用于证明 Full 不牺牲基础事实核查能力。
+
+---
+
+### 8.2 Grounded-needed F1
+
+只在 routing 判定为 grounded_needed 的测试子集上计算 Macro-F1。
+
+```text
+F1_grounded_needed
+```
+
+该指标用于回答：
+
+```text
+模型是否真的提升了需要 evidence 的样本？
 ```
 
 ---
 
-### 16.2 Routing
+### 8.3 No-evidence Evaluation
+
+将 evidence 移除，只保留 claim：
+
+```text
+claim + empty evidence
+```
+
+得到：
+
+```text
+F1_no_evidence
+```
+
+定义：
+
+```text
+ΔRemove = F1_clean - F1_no_evidence
+```
+
+如果模型真的依赖 evidence，移除 evidence 后性能应该明显下降，因此 `ΔRemove` 应该更大。
+
+---
+
+### 8.4 Shuffled-evidence Evaluation
+
+将 evidence 替换为其他样本的 evidence：
+
+```text
+claim + shuffled evidence
+```
+
+得到：
+
+```text
+F1_shuffled_evidence
+```
+
+定义：
+
+```text
+ΔShuffle = F1_clean - F1_shuffled_evidence
+```
+
+如果模型真的依赖正确 evidence，那么换成错误 evidence 后性能应该下降，因此 `ΔShuffle` 应该更大。
+
+---
+
+### 8.5 Claim-only Gap
+
+定义：
+
+```text
+Claim-only Gap = F1_grounded_input - F1_claim_only_input
+```
+
+该指标越大，说明模型越依赖 evidence，而不是只依赖 claim shortcut。
+
+---
+
+## 9. 推荐三张实验表
+
+### Table 1: Main Results
+
+展示整体性能：
+
+```text
+Grounded-only
+Two-branches Joint
+Routing-only
+Random Remix-only
+Full EGR-FV v2
+```
+
+指标：
+
+```text
+Acc
+Macro-F1
+```
+
+---
+
+### Table 2: Module Ablation
+
+展示各模块贡献：
+
+```text
+Full EGR-FV v2
+Full w/o Remix
+Full w/o Evidence Contrast
+Full w/o Grounded-dominant Objective
+Full w/ Hard Routing
+Full w/ In-sample Routing
+```
+
+指标：
+
+```text
+Acc
+Macro-F1
+Grounded-needed F1
+```
+
+---
+
+### Table 3: Evidence Dependence Analysis
+
+展示模型是否真正依赖 evidence：
+
+```text
+Grounded-only
+Two-branches Joint
+Routing-only
+Full w/o Evidence Contrast
+Full EGR-FV v2
+```
+
+指标：
+
+```text
+Clean F1
+No-evidence F1
+Shuffled-evidence F1
+ΔRemove
+ΔShuffle
+Claim-only Gap
+```
+
+---
+
+## 10. 合理的预期结果模式
+
+理想情况下，结果应呈现以下趋势。
+
+### 10.1 Clean Acc / Macro-F1
+
+```text
+Full EGR-FV v2 ≥ Grounded-only
+Full EGR-FV v2 ≥ Two-branches Joint
+Full EGR-FV v2 ≥ Random Remix-only
+Full EGR-FV v2 ≈ or ≥ Routing-only
+```
+
+如果 Routing-only 的 clean Acc 略高于 Full，也不是致命问题。关键是 Full 应该在 evidence-dependence 指标上更好。
+
+---
+
+### 10.2 Grounded-needed F1
+
+Full 应该优于：
+
+```text
+Grounded-only
+Two-branches Joint
+Routing-only
+Full w/o Remix
+Full w/o Grounded-dominant Objective
+```
+
+这说明 Full 确实提升了需要 evidence 的样本。
+
+---
+
+### 10.3 Evidence Sensitivity
+
+Full 应该具有更高的：
+
+```text
+ΔRemove
+ΔShuffle
+Claim-only Gap
+```
+
+这说明模型不是只靠 claim shortcut，而是真正使用 evidence。
+
+---
+
+## 11. 实验公平性要求
+
+为了避免消融实验不公平，所有实验应尽量保持以下设置一致：
+
+```text
+same train/dev/test split
+same backbone
+same optimizer
+same learning rate
+same batch size
+same final training epochs
+same random seeds
+same inference branch, unless doing inference ablation
+```
+
+特别注意以下几点。
+
+---
+
+### 11.1 Remix-only 不应使用 label 信息
+
+不建议在正式消融中使用：
 
 ```python
-routing_records = []
+if label == "NEI":
+    group = grounded_needed
+```
 
-for batch in train_loader:
-    out_s = shortcut_model(**batch["shortcut_inputs"])
-    out_g = grounded_model(**batch["grounded_inputs"])
+这会让消融变成 label-aware sampler，可能人为提升 macro-F1，尤其是 NEI 类。
 
-    for i in range(len(batch["ids"])):
-        ps = softmax(out_s["logits"][i])
-        pg = softmax(out_g["logits"][i])
+正式消融中只允许使用：
 
-        shortcut_conf = ps.max().item()
-        shortcut_pred = ps.argmax().item()
-        grounded_conf = pg.max().item()
-        grounded_pred = pg.argmax().item()
-
-        shortcut_correct = int(shortcut_pred == batch["labels"][i].item())
-        grounded_correct = int(grounded_pred == batch["labels"][i].item())
-
-        disagreement = kl_div(pg, ps)
-
-        necessity_score = (
-            1.0 * int(grounded_correct and not shortcut_correct)
-            + 0.5 * disagreement
-            + 0.5 * int(shortcut_conf > 0.8 and not shortcut_correct)
-        )
-
-        group = route(shortcut_conf, shortcut_correct, grounded_correct, disagreement, necessity_score)
-
-        routing_records.append({
-            "id": batch["ids"][i],
-            "shortcut_conf": shortcut_conf,
-            "shortcut_correct": bool(shortcut_correct),
-            "grounded_conf": grounded_conf,
-            "grounded_correct": bool(grounded_correct),
-            "disagreement": disagreement,
-            "necessity_score": necessity_score,
-            "group": group
-        })
+```text
+random grouping
+length-only grouping
+model-free metadata grouping
 ```
 
 ---
 
-### 16.3 Remix Training
+### 11.2 除 inference ablation 外，推理方式必须一致
 
-```python
-for epoch in range(epochs):
-    for step in range(steps_per_epoch):
-        batch_type, batch = scheduler.next_batch(global_step=step, epoch=epoch)
+所有主要方法都应使用：
 
-        out_s = shortcut_model(**batch["shortcut_inputs"])
-        out_g = grounded_model(**batch["grounded_inputs"])
+```text
+grounded-only inference
+```
 
-        loss_s = ce(out_s["logits"], batch["labels"])
-        loss_g = weighted_ce(out_g["logits"], batch["labels"], batch["weights"])
-        loss_o = orth_loss(out_s["hidden"], out_g["hidden"])
+否则 fusion 或 shortcut branch 可能在 clean Acc 上占便宜，但这不符合 evidence-grounded debiasing 的目标。
 
-        if batch_type == "bias":
-            loss = loss_s + 0.1 * loss_g
-        elif batch_type == "grounded":
-            loss = 1.5 * loss_g + 0.2 * loss_s + lambda_orth * loss_o
-        else:
-            loss = loss_g + lambda_shortcut * loss_s + lambda_orth * loss_o
+---
 
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
+### 11.3 Full 增加了 contrast loss，因此必须有 w/o contrast
+
+Evidence contrastive loss 本质上引入了额外训练信号，因此必须设置：
+
+```text
+Full w/o Evidence Contrast
+```
+
+否则无法判断提升来自 routing/remix，还是来自 contrastive data augmentation。
+
+---
+
+## 12. 论文中可使用的简短描述
+
+英文版本：
+
+```text
+The full model is trained in three stages. First, we independently warm up a grounded branch on claim-evidence pairs and a shortcut branch on claim-only inputs. Second, we perform out-of-fold routing to estimate an evidence-necessity score for each training instance based on the disagreement and correctness patterns between the two branches. Third, we train the final model with routing-guided distribution-preserving remixing and a grounded-dominant objective, where evidence-needed samples receive larger grounded loss weights and smaller shortcut loss weights. We further introduce an evidence contrastive loss by comparing gold evidence, shuffled evidence, and empty evidence inputs. At inference time, only the grounded branch is used.
+```
+
+中文版本：
+
+```text
+完整模型分三阶段训练。首先分别预训练 grounded branch 和 shortcut branch。其次，采用 out-of-fold routing 为每个训练样本估计 evidence necessity score。最后，基于该分数进行 distribution-preserving batch remix，并使用 grounded-dominant objective 训练最终模型。对于 evidence-needed 样本，提高 grounded branch 的 loss 权重，同时降低 shortcut branch 的 loss 权重。此外，通过 gold evidence、shuffled evidence 和 empty evidence 构造 evidence contrastive loss，使 grounded branch 更依赖证据。推理阶段仅使用 grounded branch。
 ```
 
 ---
 
-## 17. Suggested Shell Scripts
+## 13. 最小可执行实验版本
 
-## 17.1 Warmup Shortcut
+如果当前时间有限，建议优先实现以下 6 个实验：
 
-`scripts/run_warmup_shortcut.sh`
+```text
+1. Grounded-only
+2. Two-branches Joint
+3. Routing-only
+4. Full w/o Remix
+5. Full w/o Evidence Contrast
+6. Full EGR-FV v2
+```
+
+这 6 个实验已经能够支撑主要结论：
+
+```text
+Grounded-only:
+  提供基础事实核查模型对照
+
+Two-branches Joint:
+  排除“只是多了 shortcut branch”的解释
+
+Routing-only:
+  验证 routing weight 的作用
+
+Full w/o Remix:
+  验证 remix 的作用
+
+Full w/o Evidence Contrast:
+  验证 evidence contrast 的作用
+
+Full EGR-FV v2:
+  完整方法
+```
+
+---
+
+## 14. 总结
+
+新的实验设计不再把目标简单定义为：
+
+```text
+Full 必须在 clean Acc / Macro-F1 上高于所有消融
+```
+
+而是定义为：
+
+```text
+Full 应在保持 clean performance 的同时，显著提升 evidence dependence、grounded-needed group performance 和 robustness under evidence perturbation。
+```
+
+因此，最终判断 Full 是否合理，应同时观察：
+
+```text
+Acc_clean
+Macro-F1_clean
+F1_grounded_needed
+ΔRemove
+ΔShuffle
+Claim-only Gap
+```
+
+只要 Full 在 clean performance 上不显著退化，并且在 evidence-dependence 指标上明显优于消融实验，就能更有力地证明 EGR-FV v2 的去偏价值。
+
+---
+
+## 15. Linux 环境运行命令
+
+推荐使用总控脚本：
 
 ```bash
-python -m src.main \
-  --config configs/shortcut.yaml \
-  --mode warmup_shortcut
+sh run_scripts/run_egrfv_v2.sh main
 ```
 
----
-
-## 17.2 Warmup Grounded
-
-`scripts/run_warmup_grounded.sh`
+常用命令如下：
 
 ```bash
-python -m src.main \
-  --config configs/grounded.yaml \
-  --mode warmup_grounded
+# 只跑主实验：warm-up + routing + Full EGR-FV v2 + eval
+sh run_scripts/run_egrfv_v2.sh main
+
+# 跑最小 6 个实验：Grounded-only / Two-branches / Routing-only / w/o Remix / w/o Contrast / Full
+sh run_scripts/run_egrfv_v2.sh ablation-min
+
+# 跑完整消融实验矩阵
+sh run_scripts/run_egrfv_v2.sh ablation-all
+
+# 只重新评估完整实验矩阵
+sh run_scripts/run_egrfv_v2.sh eval-all
 ```
 
----
-
-## 17.3 Run Routing
-
-`scripts/run_routing.sh`
+指定 GPU 或 Python 环境：
 
 ```bash
-python -m src.main \
-  --config configs/routing.yaml \
-  --mode routing
+CUDA_VISIBLE_DEVICES=0 PYTHON_BIN=/path/to/python sh run_scripts/run_egrfv_v2.sh ablation-min
 ```
 
----
+结果汇总文件：
 
-## 17.4 Run Remix
-
-`scripts/run_remix.sh`
-
-```bash
-python -m src.main \
-  --config configs/remix.yaml \
-  --mode remix
+```text
+outputs/HOVER/predictions/ablation_summary.csv
 ```
-
----
-
-## 17.5 Evaluate
-
-`scripts/run_eval.sh`
-
-```bash
-python -m src.main \
-  --config configs/remix.yaml \
-  --mode eval
-```
-
----
-
-## 18. Recommended Main Entry Design
-
-建议 `src/main.py` 支持以下 mode：
-
-- `warmup_shortcut`
-- `warmup_grounded`
-- `routing`
-- `remix`
-- `eval`
-
-示例：
-
-```python
-if args.mode == "warmup_shortcut":
-    trainer = WarmupTrainer(...)
-    trainer.train_shortcut()
-elif args.mode == "warmup_grounded":
-    trainer = WarmupTrainer(...)
-    trainer.train_grounded()
-elif args.mode == "routing":
-    run_routing(...)
-elif args.mode == "remix":
-    trainer = RemixTrainer(...)
-    trainer.train()
-elif args.mode == "eval":
-    evaluate(...)
-```
-
----
-
-## 19. Logging Recommendations
-
-建议记录以下日志：
-
-### Train-level
-
-- total loss
-- shortcut loss
-- grounded loss
-- orth loss
-- learning rate
-
-### Group-level
-
-- 每类样本数
-- 每类样本 accuracy / f1
-- 每类样本平均 loss
-
-### Batch-level
-
-- 当前 batch type
-- batch 中各 group 占比
-- grounded vs shortcut 平均置信度
-
-### Useful tools
-
-- TensorBoard
-- Weights & Biases
-- CSV logger
-
----
-
-## 20. Common Failure Modes
-
-### Failure 1: Routing 全部偏向 bias_easy
-
-可能原因：
-
-- shortcut warm-up 太强
-- necessity score 设计太弱
-- grounded warm-up 不够
-
-### Failure 2: Grounded batch 上仍然学不到 evidence
-
-可能原因：
-
-- evidence 编码方式太弱
-- claim 与 evidence 拼接不合理
-- weighted loss 太小
-
-### Failure 3: Joint training 不稳定
-
-可能原因：
-
-- `λ_s` 太大
-- `L_orth` 太强
-- batch ratio 不合理
-
-### Failure 4: 推理时 grounding 不敏感
-
-可能原因：
-
-- fusion head 过度依赖 shortcut
-- 训练期间 bias_easy 仍占主导
-
----
-
-## 21. Recommended Default Settings
-
-用于第一版跑通的保守配置：
-
-```yaml
-model:
-  shortcut_encoder: roberta-base
-  grounded_encoder: roberta-base
-
-training:
-  epochs: 3
-  batch_size: 16
-  lr: 2e-5
-
-loss:
-  lambda_shortcut: 0.2
-  lambda_orth: 0.0
-
-routing:
-  strategy: hybrid
-  tau_shortcut_high: 0.8
-  tau_disagreement_low: 0.1
-
-remix:
-  schedule: alternating
-  mixed_ratio:
-    bias_easy: 0.3
-    grounded_needed: 0.4
-    hard: 0.3
-```
-
-原因：
-
-- 先追求稳定
-- 暂时不引入太强的 disentanglement regularization
-- 等第一版通了再加复杂模块
-
----
-
-## 22. Future Extensions
-
-后续可以扩展到：
-
-1. **Multi-evidence verification**
-2. **Sentence selection + verification joint training**
-3. **Graph-based evidence aggregation**
-4. **Counterfactual evidence augmentation**
-5. **Adversarial claim debiasing**
-6. **Multi-hop fact verification**
-
----
-
-## 23. Deliverables Checklist
-
-建议按以下完成情况推进项目：
-
-- [ ] 读取并预处理数据
-- [ ] 实现 `ShortcutModel`
-- [ ] 实现 `GroundedModel`
-- [ ] 实现 warm-up trainer
-- [ ] 实现 routing score 计算
-- [ ] 实现 routing cache 输出
-- [ ] 实现 remix sampler
-- [ ] 实现 remix trainer
-- [ ] 实现 group-wise evaluation
-- [ ] 实现 evidence sensitivity evaluation
-
----
-
-## 24. Summary
-
-EGR-FV 的核心不是简单增加一个 claim-only baseline，而是构造一个**显式可控的双分支训练框架**：
-
-- 用 shortcut branch 识别偏置
-- 用 grounded branch 学习真实验证语义
-- 用 routing 找出 evidence-needed 样本
-- 用 reassembled batches 改变训练梯度的主导方向
-- 最终让 grounded branch 成为真正负责决策的主分支
-
-从代码实现角度，建议你优先完成：
-
-1. `GroundedModel`
-2. `ShortcutModel`
-3. `routing.py`
-4. `remix_sampler.py`
-5. `remix_trainer.py`
-
-先跑通最小版本，再逐步加：
-
-- weighted loss
-- orthogonality loss
-- fusion head
-- curriculum remix
-- robustness evaluation
-
----
-
-## 25. Reference
-
-### Paper
-
-- Evidence-Grounded Remixing for Debiased Fact Verification  
-- Reference paper URL: `http://arxiv.org/pdf/2506.11550`
-
-### Code
-
-- Reference repository: `https://github.com/MatthewMaxy/Remix_ICML2025`
-
-> 注意：本 README 是**面向工程落地的实现设计文档**。其中部分 scoring、routing、loss 形式是为便于实现而做的工程化展开，真正落地时可根据实验结果继续调整。

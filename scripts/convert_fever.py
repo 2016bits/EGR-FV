@@ -9,6 +9,9 @@ from typing import Any, Iterable
 
 DEFAULT_SPLITS = ("train", "dev", "test")
 RAW_FILENAME_TEMPLATE = "{split}_2.json"
+RAW_FILENAME_OVERRIDES = {
+    "symmetric": "symmetric_generated.json",
+}
 IPA_CHARS_PATTERN = re.compile(r"[^\x00-\x7F]+")
 
 
@@ -24,7 +27,7 @@ def parse_args() -> argparse.Namespace:
         "--splits",
         nargs="+",
         default=list(DEFAULT_SPLITS),
-        help="Dataset splits to convert. Defaults to train dev test.",
+        help="Dataset splits to convert. Defaults to train dev test. Use `symmetric` for symmetric-FEVER.",
     )
     parser.add_argument("--indent", type=int, default=4, help="JSON indentation for converted files")
     return parser.parse_args()
@@ -68,7 +71,8 @@ def convert_record(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def convert_split(raw_dir: Path, output_dir: Path, split: str, indent: int) -> Path:
-    raw_path = raw_dir / RAW_FILENAME_TEMPLATE.format(split=split)
+    raw_filename = RAW_FILENAME_OVERRIDES.get(split, RAW_FILENAME_TEMPLATE.format(split=split))
+    raw_path = raw_dir / raw_filename
     output_path = output_dir / f"{split}.json"
     if not raw_path.exists():
         raise FileNotFoundError(f"Raw FEVER split not found: {raw_path}")

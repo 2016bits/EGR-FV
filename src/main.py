@@ -136,7 +136,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         required=True,
-        choices=["warmup_shortcut", "warmup_grounded", "routing", "remix", "eval"],
+        choices=[
+            "warmup_shortcut",
+            "warmup_grounded",
+            "train_claim_only",
+            "train_claim_evidence",
+            "routing",
+            "remix",
+            "eval",
+        ],
     )
     parser.add_argument("--shortcut_ckpt", default=None, help="Optional shortcut checkpoint override")
     parser.add_argument("--grounded_ckpt", default=None, help="Optional grounded checkpoint override")
@@ -310,16 +318,25 @@ def validate_routing_cache(config: Mapping[str, Any], routing_path: Path) -> Non
         )
 
 
-def resolve_eval_mode(config: Mapping[str, Any], shortcut_loaded: bool, fusion_head) -> str:
+def resolve_eval_mode(
+    config: Mapping[str, Any],
+    shortcut_loaded: bool,
+    grounded_loaded: bool,
+    fusion_head,
+) -> str:
     inference_cfg = config.get("inference", {})
     requested_branch = str(inference_cfg.get("branch", "")).strip().lower()
     if requested_branch in {"grounded", "grounded_only", ""}:
+        if not grounded_loaded:
+            raise ValueError("inference.branch=grounded requires a loaded grounded checkpoint.")
         return "grounded"
     if requested_branch in {"shortcut", "shortcut_only"}:
         if not shortcut_loaded:
             raise ValueError("inference.branch=shortcut requires a loaded shortcut checkpoint.")
         return "shortcut"
     if requested_branch == "fusion":
+        if not grounded_loaded:
+            raise ValueError("inference.branch=fusion requires a loaded grounded checkpoint.")
         if not shortcut_loaded:
             raise ValueError("inference.branch=fusion requires a loaded shortcut checkpoint.")
         return "fusion"
@@ -461,7 +478,7 @@ def main() -> None:
     )
     print(f"Using device: {device}")
 
-    if args.mode == "warmup_shortcut":
+    if args.mode in {"warmup_shortcut", "train_claim_only"}:
         warmup_config = config_with_warmup_epochs(config, "shortcut")
         train_dataset = build_dataset(config, "train", label_to_id, id_to_label)
         val_dataset = build_dataset(config, "val", label_to_id, id_to_label)
@@ -485,7 +502,7 @@ def main() -> None:
         trainer.train_shortcut()
         return
 
-    if args.mode == "warmup_grounded":
+    if args.mode in {"warmup_grounded", "train_claim_evidence"}:
         warmup_config = config_with_warmup_epochs(config, "grounded")
         train_dataset = build_dataset(config, "train", label_to_id, id_to_label)
         val_dataset = build_dataset(config, "val", label_to_id, id_to_label)
@@ -619,6 +636,7 @@ def main() -> None:
     test_dataset = build_dataset(config, "test", label_to_id, id_to_label)
     shortcut_model, grounded_model, fusion_head = build_models(config)
     shortcut_loaded = False
+    grounded_loaded = False
     fusion_loaded = False
 
     eval_ckpt = resolve_ckpt(config, "remix", args.ckpt)
@@ -631,6 +649,7 @@ def main() -> None:
             ["grounded_model_state", "model_state"],
             map_location=device,
         )
+        grounded_loaded = True
         if "shortcut_model_state" in checkpoint:
             shortcut_model.load_state_dict(checkpoint["shortcut_model_state"])
             shortcut_loaded = True
@@ -657,6 +676,7 @@ def main() -> None:
                 ["model_state", "grounded_model_state"],
                 map_location=device,
             )
+            grounded_loaded = True
         if shortcut_ckpt and Path(shortcut_ckpt).exists():
             load_model_state(
                 shortcut_model,
@@ -681,10 +701,13 @@ def main() -> None:
 
     if not shortcut_loaded:
         shortcut_model = None
+    if not grounded_loaded:
+        grounded_model = None
 
     if shortcut_model is not None:
         shortcut_model.to(device)
-    grounded_model.to(device)
+    if grounded_model is not None:
+        grounded_model.to(device)
     if fusion_head is not None:
         fusion_head.to(device)
 
@@ -704,7 +727,12 @@ def main() -> None:
         routing_config=config.get("routing", {}),
         eval_grouping=str(config.get("evaluation", {}).get("grouping", "dynamic")),
     )
-    eval_mode = resolve_eval_mode(config, shortcut_model is not None, fusion_head)
+    eval_mode = resolve_eval_mode(
+        config,
+        shortcut_model is not None,
+        grounded_model is not None,
+        fusion_head,
+    )
     evaluator.run_full_evaluation(
         dataset=test_dataset,
         report_path=str(Path(config["outputs"]["prediction_dir"]) / "eval_report.json"),

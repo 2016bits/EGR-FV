@@ -134,6 +134,8 @@ class Evaluator:
             raise ValueError(f"Unsupported evaluation mode: {mode}")
         if mode == "shortcut" and self.shortcut_model is None:
             raise ValueError("Shortcut evaluation requested, but shortcut_model is not loaded.")
+        if mode in {"grounded", "fusion"} and self.grounded_model is None:
+            raise ValueError("Grounded evaluation requested, but grounded_model is not loaded.")
 
         loader_mode = "shortcut" if mode == "shortcut" else "joint"
         dataloader = self._build_loader(dataset, mode=loader_mode)
@@ -296,7 +298,7 @@ class Evaluator:
             "remove_evidence": remove_report["metrics"],
             "shuffle_evidence": shuffle_report["metrics"],
         }
-        if mode != "grounded":
+        if mode != "grounded" and self.grounded_model is not None:
             grounded_report = self.evaluate_dataset(dataset, mode="grounded")
             sensitivity["grounded_branch"] = grounded_report["metrics"]
         if self.shortcut_model is not None:

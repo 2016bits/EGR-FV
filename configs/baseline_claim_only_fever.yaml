@@ -1,0 +1,23 @@
+base: fever.yaml
+
+experiment:
+  name: baseline_claim_only_fever
+  mode: shortcut_only
+
+checkpoints:
+  shortcut: outputs/FEVER/baselines/claim_only/checkpoints/shortcut_best.pt
+  grounded: ""
+  remix: ""
+
+outputs:
+  checkpoint_dir: outputs/FEVER/baselines/claim_only/checkpoints
+  log_dir: outputs/FEVER/baselines/claim_only/logs
+  prediction_dir: outputs/FEVER/baselines/claim_only/predictions/fever
+
+inference:
+  branch: shortcut
+  fusion_alpha: 0.5
+  fusion_method: probability_average
+
+evaluation:
+  grouping: record

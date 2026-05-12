@@ -1,0 +1,23 @@
+base: fever.yaml
+
+experiment:
+  name: baseline_claim_evidence_fever
+  mode: grounded_only
+
+checkpoints:
+  shortcut: ""
+  grounded: outputs/FEVER/baselines/claim_evidence/checkpoints/grounded_best.pt
+  remix: ""
+
+outputs:
+  checkpoint_dir: outputs/FEVER/baselines/claim_evidence/checkpoints
+  log_dir: outputs/FEVER/baselines/claim_evidence/logs
+  prediction_dir: outputs/FEVER/baselines/claim_evidence/predictions/fever
+
+inference:
+  branch: grounded
+  fusion_alpha: 0.5
+  fusion_method: probability_average
+
+evaluation:
+  grouping: record

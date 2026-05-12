@@ -401,6 +401,36 @@ data/
 
 The exact command names may vary by implementation, but the intended workflow is:
 
+### FEVER Claim-Only And Claim-Evidence Baselines
+
+Train on FEVER train/dev, then evaluate on both FEVER test and symmetric-FEVER:
+
+```bash
+sh run_scripts/run_fever_baselines.sh
+```
+
+Run one baseline at a time:
+
+```bash
+sh run_scripts/run_claim_only_fever.sh
+sh run_scripts/run_claim_evidence_fever.sh
+```
+
+Useful environment variables:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 sh run_scripts/run_fever_baselines.sh
+RUN_TRAIN=0 sh run_scripts/run_fever_baselines.sh
+PREPROCESS=1 sh run_scripts/run_fever_baselines.sh
+```
+
+Outputs are written to:
+
+```text
+outputs/FEVER/baselines/claim_only/
+outputs/FEVER/baselines/claim_evidence/
+```
+
 ### 1. Train Grounded Warm-up
 
 ```bash

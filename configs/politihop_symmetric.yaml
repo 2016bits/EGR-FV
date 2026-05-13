@@ -1,0 +1,10 @@
+base: politihop.yaml
+
+experiment:
+  name: full_egr_fv_symmetric_politihop
+
+data:
+  test_path: data/PolitiHop/converted_data/symmetric.json
+
+outputs:
+  prediction_dir: outputs/PolitiHop/predictions/symmetric_politihop

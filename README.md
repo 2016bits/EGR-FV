@@ -431,6 +431,42 @@ outputs/FEVER/baselines/claim_only/
 outputs/FEVER/baselines/claim_evidence/
 ```
 
+### FEVER EGR Ablations
+
+Run the EGR ablations on FEVER, evaluate each checkpoint on both FEVER test and symmetric-FEVER, then summarize the results:
+
+```bash
+sh run_scripts/run_fever_ablation.sh
+```
+
+The workflow covers:
+
+- `Routing-only`
+- `Full w/o Evidence Contrast`
+- `Full w/o Grounded-dominant`
+- `Full w/o Remix`
+- `Hard routing`
+- `In-sample routing`
+
+Useful environment variables:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 sh run_scripts/run_fever_ablation.sh
+RUN_ROUTING=0 sh run_scripts/run_fever_ablation.sh
+RUN_TRAIN=0 sh run_scripts/run_fever_ablation.sh
+RUN_EVAL=0 sh run_scripts/run_fever_ablation.sh
+SKIP_EXISTING=0 sh run_scripts/run_fever_ablation.sh
+```
+
+Outputs are written to:
+
+```text
+outputs/FEVER/checkpoints/<ablation>/
+outputs/FEVER/predictions/<ablation>/fever/
+outputs/FEVER/predictions/<ablation>/symmetric_fever/
+outputs/FEVER/predictions/fever_ablation_report.md
+```
+
 ### 1. Train Grounded Warm-up
 
 ```bash

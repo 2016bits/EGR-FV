@@ -1,0 +1,24 @@
+base: fever.yaml
+
+experiment:
+  name: full_wo_evidence_contrast_fever
+  mode: full_wo_evidence_contrast
+
+model:
+  use_fusion: false
+
+loss:
+  use_grounded_dominant: true
+  use_evidence_contrast: false
+  lambda_contrast: 0.0
+
+checkpoints:
+  remix: outputs/FEVER/checkpoints/full_wo_evidence_contrast/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/FEVER/checkpoints/full_wo_evidence_contrast
+  log_dir: outputs/FEVER/logs/full_wo_evidence_contrast
+  prediction_dir: outputs/FEVER/predictions/full_wo_evidence_contrast/fever
+
+inference:
+  branch: grounded

@@ -1,0 +1,25 @@
+base: fever.yaml
+
+experiment:
+  name: routing_only_fever
+  mode: routing_only
+
+model:
+  use_fusion: false
+
+loss:
+  use_grounded_dominant: true
+  use_evidence_contrast: false
+  lambda_shortcut: 0.1
+  lambda_orth: 0.0
+
+checkpoints:
+  remix: outputs/FEVER/checkpoints/routing_only/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/FEVER/checkpoints/routing_only
+  log_dir: outputs/FEVER/logs/routing_only
+  prediction_dir: outputs/FEVER/predictions/routing_only/fever
+
+inference:
+  branch: grounded

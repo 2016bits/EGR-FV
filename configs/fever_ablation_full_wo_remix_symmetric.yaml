@@ -1,0 +1,10 @@
+base: fever_ablation_full_wo_remix.yaml
+
+experiment:
+  name: full_wo_remix_symmetric_fever
+
+data:
+  test_path: data/FEVER/converted_data/symmetric.json
+
+outputs:
+  prediction_dir: outputs/FEVER/predictions/full_wo_remix/symmetric_fever

@@ -1,0 +1,10 @@
+base: fever_ablation_full_hard_routing.yaml
+
+experiment:
+  name: full_hard_routing_symmetric_fever
+
+data:
+  test_path: data/FEVER/converted_data/symmetric.json
+
+outputs:
+  prediction_dir: outputs/FEVER/predictions/full_hard_routing/symmetric_fever

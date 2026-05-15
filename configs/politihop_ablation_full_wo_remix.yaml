@@ -1,0 +1,23 @@
+base: politihop.yaml
+
+experiment:
+  name: full_wo_remix_politihop
+  mode: full_wo_remix
+
+model:
+  use_fusion: false
+
+loss:
+  use_grounded_dominant: true
+  use_evidence_contrast: true
+
+checkpoints:
+  remix: outputs/PolitiHop/checkpoints/full_wo_remix/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/PolitiHop/checkpoints/full_wo_remix
+  log_dir: outputs/PolitiHop/logs/full_wo_remix
+  prediction_dir: outputs/PolitiHop/predictions/full_wo_remix
+
+inference:
+  branch: grounded

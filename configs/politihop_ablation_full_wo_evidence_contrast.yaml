@@ -1,0 +1,24 @@
+base: politihop.yaml
+
+experiment:
+  name: full_wo_evidence_contrast_politihop
+  mode: full_wo_evidence_contrast
+
+model:
+  use_fusion: false
+
+loss:
+  use_grounded_dominant: true
+  use_evidence_contrast: false
+  lambda_contrast: 0.0
+
+checkpoints:
+  remix: outputs/PolitiHop/checkpoints/full_wo_evidence_contrast/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/PolitiHop/checkpoints/full_wo_evidence_contrast
+  log_dir: outputs/PolitiHop/logs/full_wo_evidence_contrast
+  prediction_dir: outputs/PolitiHop/predictions/full_wo_evidence_contrast
+
+inference:
+  branch: grounded

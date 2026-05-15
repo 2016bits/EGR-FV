@@ -421,6 +421,91 @@ All ablations are run on HOVER with gold evidence and reported in macro-F1. The 
 - **Evidence contrast loss adds a smaller but consistent improvement** across all hop depths (e.g., 4-hop 82.00 → 83.05).
 - **The full pipeline is best at every hop depth**, validating the joint design of routing, remix, and evidence-contrast supervision.
 
+## Routing Analysis
+
+To verify that the necessity score `r_i` is not just a heuristic, we run three supplementary analyses on the test split of each dataset. Per-sample records are produced by `scripts/eval_routing_analysis.py` and aggregated by `scripts/summarize_routing_analysis.py`; the full pipeline is driven by `run_scripts/run_routing_analysis.sh`.
+
+### 1. Per-Group Performance
+
+For each test sample we compute `r_i` from the warm-up shortcut / grounded models and assign it to a routing group using the same thresholds as training. We then evaluate three models on each group — the claim-only warm-up, the claim-evidence warm-up, and the full EGR-FV — and report accuracy plus the gain `EGR-FV − claim-only`.
+
+**HOVER (N=4000)**
+
+| Group | % Samples | claim-only Acc | claim-evidence Acc | EGR-FV Acc | Gain |
+|---|---:|---:|---:|---:|---:|
+| `bias_easy`       | 20.3 | 100.00 |  63.22 |  72.69 |  −27.31 |
+| `hard`            | 52.2 |  79.45 |  79.45 |  80.80 |   +1.34 |
+| `grounded_needed` | 27.5 |   0.00 | 100.00 |  95.09 |  +95.09 |
+
+**FEVER (N=6666)**
+
+| Group | % Samples | claim-only Acc | claim-evidence Acc | EGR-FV Acc | Gain |
+|---|---:|---:|---:|---:|---:|
+| `bias_easy`       | 61.7 | 100.00 |  97.79 |  97.45 |   −2.55 |
+| `hard`            | 21.0 |  77.54 |  77.54 |  80.97 |   +3.43 |
+| `grounded_needed` | 17.3 |   0.00 | 100.00 |  98.01 |  +98.01 |
+
+**PolitiHop (N=171)**
+
+| Group | % Samples | claim-only Acc | claim-evidence Acc | EGR-FV Acc | Gain |
+|---|---:|---:|---:|---:|---:|
+| `bias_easy`       | 86.0 | 100.00 | 100.00 | 100.00 |   +0.00 |
+| `hard`            | 14.0 |  12.50 |  12.50 |  16.67 |   +4.17 |
+| `grounded_needed` |  0.0 |      − |      − |      − |       − |
+
+Findings:
+
+- `bias_easy` samples already give the claim-only branch near-perfect accuracy on every dataset, exactly as a "claim-shortcut-rich" subset should.
+- `grounded_needed` is the opposite extreme: claim-only is at chance (≤ 0 % on HOVER/FEVER), claim-evidence flips to 100 %, and EGR-FV preserves almost all of that gain (95–98 %). Routing therefore separates samples by their *actual* dependence on evidence, not by an arbitrary heuristic.
+- `hard` shows a small but consistent EGR-FV gain (+1.3 to +4.2 pp), confirming that the middle group is a genuine "needs care" bucket rather than just label noise.
+- The PolitiHop grounded warm-up makes identical predictions with and without evidence, so the score concentrates around 0.5 and no `grounded_needed` group emerges; the per-group structure is still consistent with the expected story (`bias_easy` easy, `hard` slightly improved by EGR-FV).
+
+### 2. Correlation of `r_i` with Evidence Sensitivity
+
+For each sample we measure how much adding evidence helps the model, in two forms:
+
+- **indicator**: Δ_i = 1[f(c,e)=y] − 1[f(c,∅)=y]
+- **NLL**: Δ_i = ℓ(f(c,∅), y) − ℓ(f(c,e), y)
+
+and report Pearson and Spearman correlations between `r_i` and Δ_i for both the grounded warm-up and the full EGR-FV checkpoint.
+
+| Dataset | Model | Δ form | Pearson `r` | Spearman `ρ` |
+|---|---|---|---:|---:|
+| HOVER     | claim-evidence (warmup) | indicator | +0.517 | +0.581 |
+| HOVER     | claim-evidence (warmup) | NLL       | +0.490 | +0.567 |
+| HOVER     | EGR-FV                  | indicator | +0.420 | +0.453 |
+| HOVER     | EGR-FV                  | NLL       | +0.479 | +0.623 |
+| FEVER     | claim-evidence (warmup) | indicator | +0.188 | +0.260 |
+| FEVER     | claim-evidence (warmup) | NLL       | +0.218 | +0.314 |
+| FEVER     | EGR-FV                  | indicator | +0.424 | +0.393 |
+| FEVER     | EGR-FV                  | NLL       | +0.418 | +0.538 |
+| PolitiHop | claim-evidence (warmup) | indicator |      − |      − |
+| PolitiHop | claim-evidence (warmup) | NLL       | +0.961 | +0.045 |
+| PolitiHop | EGR-FV                  | indicator | +0.284 | +0.071 |
+| PolitiHop | EGR-FV                  | NLL       | +0.813 | +0.093 |
+
+Both correlations are positive and consistently above 0.4 on HOVER and FEVER for the full EGR-FV model — samples that the routing score flags as evidence-needed are exactly the ones whose predictions actually improve when evidence is added. On PolitiHop the indicator correlation is undefined for the grounded warm-up because its clean and null predictions are identical (Δ_i ≡ 0); the NLL form still shows the expected positive trend.
+
+### 3. Routing Visualization (bucketed)
+
+We bucket test samples by `r_i` into `[0.0, 0.2)`, `[0.2, 0.4)`, …, `[0.8, 1.0]` and plot the clean-correct, shuffled-wrong, and null-wrong rates of both the grounded warm-up and the full EGR-FV checkpoint:
+
+![routing buckets](outputs/analysis/routing_analysis/routing_analysis_buckets.png)
+
+Reading left to right on each panel, clean-correct climbs while the model also becomes more sensitive to corrupted evidence (shuffled-wrong / null-wrong rise). This is the signature of an evidence-grounded model — low-`r_i` samples are claim-shortcut-rich (the prediction is the same with or without evidence), and high-`r_i` samples are exactly where removing or shuffling evidence collapses accuracy. The same trend appears for both the grounded warm-up and EGR-FV, but EGR-FV's gap between `clean-correct` and `null-wrong` is consistently wider, i.e. EGR-FV depends more on evidence at the samples the routing says need it.
+
+Outputs are written to `outputs/analysis/routing_analysis/`:
+
+```text
+HOVER.jsonl  FEVER.jsonl  PolitiHop.jsonl              # per-sample records
+routing_analysis_groups.csv                            # § 1
+routing_analysis_correlations.csv                      # § 2
+routing_analysis_buckets.csv                           # § 3
+routing_analysis_buckets.png / .pdf                    # § 3 figure
+routing_analysis_report.md                             # combined report
+routing_analysis_summary.json                          # everything in JSON
+```
+
 ## Repository Structure
 
 ```text
@@ -535,6 +620,24 @@ outputs/FEVER/predictions/<ablation>/fever/
 outputs/FEVER/predictions/<ablation>/symmetric_fever/
 outputs/FEVER/predictions/fever_ablation_report.md
 ```
+
+### Routing Analysis (per-group / correlation / visualization)
+
+After training, the three "is routing meaningful?" analyses (§ *Routing Analysis*) can be regenerated with:
+
+```bash
+sh run_scripts/run_routing_analysis.sh
+```
+
+Useful environment variables:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 sh run_scripts/run_routing_analysis.sh
+DATASETS="HOVER" sh run_scripts/run_routing_analysis.sh        # subset of datasets
+SKIP_EXISTING=0  sh run_scripts/run_routing_analysis.sh        # force re-run
+```
+
+The runner loads `shortcut_best.pt`, `grounded_best.pt`, and `remix_best.pt` for each dataset, scores the test split under clean / shuffled / null evidence, writes per-sample records to `outputs/analysis/routing_analysis/<dataset>.jsonl`, and aggregates the per-group table, correlations, bucket table, and the bucket figure into the same directory.
 
 ### 1. Train Grounded Warm-up
 

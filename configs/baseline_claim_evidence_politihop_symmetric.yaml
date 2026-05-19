@@ -1,0 +1,10 @@
+base: baseline_claim_evidence_politihop.yaml
+
+experiment:
+  name: baseline_claim_evidence_symmetric_politihop
+
+data:
+  test_path: data/PolitiHop/converted_data/symmetric.json
+
+outputs:
+  prediction_dir: outputs/PolitiHop/baselines/claim_evidence/predictions/symmetric_politihop

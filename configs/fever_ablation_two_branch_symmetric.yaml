@@ -1,0 +1,10 @@
+base: fever_ablation_two_branch.yaml
+
+experiment:
+  name: two_branches_joint_symmetric_fever
+
+data:
+  test_path: data/FEVER/converted_data/symmetric.json
+
+outputs:
+  prediction_dir: outputs/FEVER/predictions/two_branches_joint/symmetric_fever

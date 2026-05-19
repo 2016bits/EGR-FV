@@ -149,7 +149,64 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shortcut_ckpt", default=None, help="Optional shortcut checkpoint override")
     parser.add_argument("--grounded_ckpt", default=None, help="Optional grounded checkpoint override")
     parser.add_argument("--ckpt", default=None, help="Optional evaluation/remix checkpoint override")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Optional random seed override; takes precedence over config.seed.",
+    )
+    parser.add_argument(
+        "--run_tag",
+        default=None,
+        help=(
+            "Optional run tag inserted as a subdirectory into every output / cache path "
+            "(checkpoint_dir, log_dir, prediction_dir, routing_path, checkpoints.*). "
+            "Lets multiple seeds reuse the same YAML config without overwriting each other."
+        ),
+    )
     return parser.parse_args()
+
+
+def _insert_tag_into_dir(path: str, tag: str) -> str:
+    """Append `/tag` to a directory path, preserving trailing slash behavior."""
+    return str(Path(path) / tag)
+
+
+def _insert_tag_into_file(path: str, tag: str) -> str:
+    """Insert `tag` between the parent directory and filename of a file path."""
+    p = Path(path)
+    return str(p.parent / tag / p.name)
+
+
+def apply_run_tag(config: Dict[str, Any], tag: str) -> None:
+    """Insert `tag` as a subdirectory into every output / cache path.
+
+    This makes the same YAML config reusable across multiple seeds: each run lands
+    in its own `{...}/<tag>/` subtree so checkpoints, logs, predictions, and routing
+    caches do not overwrite each other.
+    """
+    if not tag:
+        return
+
+    outputs = config.get("outputs")
+    if isinstance(outputs, dict):
+        for key in ("checkpoint_dir", "log_dir", "prediction_dir"):
+            value = outputs.get(key)
+            if value:
+                outputs[key] = _insert_tag_into_dir(str(value), tag)
+
+    checkpoints = config.get("checkpoints")
+    if isinstance(checkpoints, dict):
+        for key in ("shortcut", "grounded", "remix"):
+            value = checkpoints.get(key)
+            if value:
+                checkpoints[key] = _insert_tag_into_file(str(value), tag)
+
+    data_cfg = config.get("data")
+    if isinstance(data_cfg, dict):
+        routing_path = data_cfg.get("routing_path")
+        if routing_path:
+            data_cfg["routing_path"] = _insert_tag_into_file(str(routing_path), tag)
 
 
 def build_label_maps(config: Mapping[str, Any]) -> tuple[Dict[str, int], Dict[int, str]]:
@@ -463,8 +520,15 @@ def run_out_of_fold_routing(
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
+    if args.seed is not None:
+        config["seed"] = int(args.seed)
+    if args.run_tag:
+        apply_run_tag(config, args.run_tag)
     print("Loaded config:")
     print(f"Experiment mode: {experiment_mode(config)}")
+    if args.run_tag:
+        print(f"Run tag: {args.run_tag}")
+    print(f"Seed: {int(config.get('seed', 42))}")
     ensure_output_dirs(config)
     set_seed(int(config.get("seed", 42)))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

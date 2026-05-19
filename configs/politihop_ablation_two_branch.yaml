@@ -1,0 +1,26 @@
+base: politihop.yaml
+
+experiment:
+  name: two_branches_joint_politihop
+  mode: two_branch_only
+  uniform_sample_weights: true
+
+model:
+  use_fusion: false
+
+loss:
+  use_grounded_dominant: false
+  use_evidence_contrast: false
+  lambda_shortcut: 0.1
+  lambda_orth: 0.0
+
+checkpoints:
+  remix: outputs/PolitiHop/checkpoints/two_branches_joint/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/PolitiHop/checkpoints/two_branches_joint
+  log_dir: outputs/PolitiHop/logs/two_branches_joint
+  prediction_dir: outputs/PolitiHop/predictions/two_branches_joint/politihop
+
+inference:
+  branch: grounded

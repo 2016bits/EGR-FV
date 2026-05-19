@@ -1,0 +1,30 @@
+base: default.yaml
+
+experiment:
+  name: baseline_claim_evidence_hover
+  mode: grounded_only
+
+model:
+  use_fusion: false
+
+loss:
+  use_grounded_dominant: false
+  use_evidence_contrast: false
+
+checkpoints:
+  shortcut: ""
+  grounded: outputs/HOVER/baselines/claim_evidence/checkpoints/grounded_best.pt
+  remix: ""
+
+outputs:
+  checkpoint_dir: outputs/HOVER/baselines/claim_evidence/checkpoints
+  log_dir: outputs/HOVER/baselines/claim_evidence/logs
+  prediction_dir: outputs/HOVER/baselines/claim_evidence/predictions
+
+inference:
+  branch: grounded
+  fusion_alpha: 0.5
+  fusion_method: probability_average
+
+evaluation:
+  grouping: record

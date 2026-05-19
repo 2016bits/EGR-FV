@@ -1,0 +1,10 @@
+base: politihop_ablation_two_branch.yaml
+
+experiment:
+  name: two_branches_joint_symmetric_politihop
+
+data:
+  test_path: data/PolitiHop/converted_data/symmetric.json
+
+outputs:
+  prediction_dir: outputs/PolitiHop/predictions/two_branches_joint/symmetric_politihop

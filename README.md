@@ -421,6 +421,63 @@ All ablations are run on HOVER with gold evidence and reported in macro-F1. The 
 - **Evidence contrast loss adds a smaller but consistent improvement** across all hop depths (e.g., 4-hop 82.00 → 83.05).
 - **The full pipeline is best at every hop depth**, validating the joint design of routing, remix, and evidence-contrast supervision.
 
+## Multi-seed Significance
+
+The headline tables above are single-seed runs, which makes it hard to tell whether small gaps (e.g. FEVER orig: EGR-FV 94.09 vs. claim-evidence 94.28) reflect genuine effects or seed variance. We therefore repeat the four anchor methods — `claim-evidence`, `Two-branch joint`, `Full w/o remix`, `Full EGR-FV` — across three random seeds (`13`, `42`, `2024`) and report mean ± std plus paired significance tests.
+
+Metrics are evaluated on the splits that actually probe shortcut robustness: **FEVER-sym** accuracy, **PolitiHop-sym** accuracy, and **HOVER** macro-F1.
+
+| Method            | FEVER-sym (Acc)   | PolitiHop-sym (Acc) | HOVER (macro-F1)  |
+|---|---:|---:|---:|
+| claim-evidence    | mean ± std        | mean ± std          | mean ± std        |
+| Two-branch joint  | mean ± std        | mean ± std          | mean ± std        |
+| Full w/o remix    | mean ± std        | mean ± std          | mean ± std        |
+| **Full EGR-FV**   | mean ± std        | mean ± std          | mean ± std        |
+
+For every (method, dataset) pair we also run two paired significance tests vs. `claim-evidence` on the same seed, then combine per-seed p-values with Fisher's method:
+
+- **Paired bootstrap** (10 000 resamples over sample ids) — gives a percentile p-value for `Δ = method − baseline` after centering at the observed effect.
+- **Approximate randomization** (10 000 method/baseline label swaps) — gives a p-value robust to non-independence between paired samples.
+
+Reproduction:
+
+```bash
+sh run_scripts/run_significance.sh
+```
+
+By default this trains `(dataset × method × seed)` = `3 × 4 × 3 = 36` runs and writes the aggregated report to `outputs/significance/significance_report.md`. Useful environment variables:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 sh run_scripts/run_significance.sh
+SEEDS="13 42 2024"        sh run_scripts/run_significance.sh
+DATASETS="fever politihop" sh run_scripts/run_significance.sh
+METHODS="claim_evidence full_egr_fv" sh run_scripts/run_significance.sh
+SKIP_EXISTING=0           sh run_scripts/run_significance.sh   # force re-run
+RUN_SUMMARIZE=0           sh run_scripts/run_significance.sh   # training only
+```
+
+Per-seed isolation is handled by a `--run_tag seed<N>` flag injected into every `python -m src.main` call, which rewrites all output / cache paths (`outputs.checkpoint_dir`, `outputs.log_dir`, `outputs.prediction_dir`, `data.routing_path`, and the three `checkpoints.*` entries) to live under a `seed<N>/` subdirectory. This lets the same YAML configs be reused across seeds without overwriting each other.
+
+For a given `(dataset, seed)`, `warmup_shortcut`, `warmup_grounded`, and the out-of-fold `routing` stage are trained **once** under the dataset's main config and then shared by `two_branch`, `full_wo_remix`, and `full_egr_fv` — only their remix stages differ. The `claim_evidence` baseline trains an independent grounded model under its own `outputs/<DS>/baselines/claim_evidence/checkpoints/seed<N>/` tree.
+
+The aggregator can be re-run independently once any subset of runs has finished:
+
+```bash
+python scripts/summarize_significance.py \
+  --datasets fever politihop hover \
+  --seeds 13 42 2024 \
+  --methods claim_evidence two_branch full_wo_remix full_egr_fv
+```
+
+Outputs written to `outputs/significance/`:
+
+```text
+significance_table.csv         # mean / std / per-seed metric values
+significance_pvalues.csv       # bootstrap + randomization combined p-values vs. claim-evidence
+significance_report.md         # human-readable combined report
+significance_summary.json      # everything in JSON
+```
+
 ## Routing Analysis
 
 To verify that the necessity score `r_i` is not just a heuristic, we run three supplementary analyses on the test split of each dataset. Per-sample records are produced by `scripts/eval_routing_analysis.py` and aggregated by `scripts/summarize_routing_analysis.py`; the full pipeline is driven by `run_scripts/run_routing_analysis.sh`.

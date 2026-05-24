@@ -1,0 +1,10 @@
+base: politihop_ablation_full_wo_evidence_contrast.yaml
+
+experiment:
+  name: full_wo_evidence_contrast_symmetric_politihop
+
+data:
+  test_path: data/PolitiHop/converted_data/symmetric.json
+
+outputs:
+  prediction_dir: outputs/PolitiHop/predictions/full_wo_evidence_contrast/symmetric_politihop

@@ -96,6 +96,49 @@ COMBO_TABLE: Dict[Tuple[str, str], Dict[str, Any]] = {
         "pred_dir_orig": "outputs/HOVER/predictions/full_egr_fv_v2",
         "pred_dir_sym":  None,
     },
+
+    # --- Tier-Should extended methods --------------------------------------
+    # FEVER (orig at <base>/fever, sym at <base>/symmetric_fever, mirrors two_branch)
+    ("fever", "hard_routing"): {
+        "pred_dir_orig": "outputs/FEVER/predictions/full_hard_routing/fever",
+        "pred_dir_sym":  "outputs/FEVER/predictions/full_hard_routing/symmetric_fever",
+    },
+    ("fever", "random_remix_only"): {
+        "pred_dir_orig": "outputs/FEVER/predictions/random_remix_only/fever",
+        "pred_dir_sym":  "outputs/FEVER/predictions/random_remix_only/symmetric_fever",
+    },
+    ("fever", "wo_evidence_contrast"): {
+        "pred_dir_orig": "outputs/FEVER/predictions/full_wo_evidence_contrast/fever",
+        "pred_dir_sym":  "outputs/FEVER/predictions/full_wo_evidence_contrast/symmetric_fever",
+    },
+
+    # PolitiHop (orig at <base>, sym at <base>/symmetric_politihop, mirrors full_wo_remix)
+    ("politihop", "hard_routing"): {
+        "pred_dir_orig": "outputs/PolitiHop/predictions/full_hard_routing",
+        "pred_dir_sym":  "outputs/PolitiHop/predictions/full_hard_routing/symmetric_politihop",
+    },
+    ("politihop", "random_remix_only"): {
+        "pred_dir_orig": "outputs/PolitiHop/predictions/random_remix_only",
+        "pred_dir_sym":  "outputs/PolitiHop/predictions/random_remix_only/symmetric_politihop",
+    },
+    ("politihop", "wo_evidence_contrast"): {
+        "pred_dir_orig": "outputs/PolitiHop/predictions/full_wo_evidence_contrast",
+        "pred_dir_sym":  "outputs/PolitiHop/predictions/full_wo_evidence_contrast/symmetric_politihop",
+    },
+
+    # HOVER (orig only; no symmetric split exists for HOVER)
+    ("hover", "hard_routing"): {
+        "pred_dir_orig": "outputs/HOVER/predictions/full_hard_routing",
+        "pred_dir_sym":  None,
+    },
+    ("hover", "random_remix_only"): {
+        "pred_dir_orig": "outputs/HOVER/predictions/random_remix_only",
+        "pred_dir_sym":  None,
+    },
+    ("hover", "wo_evidence_contrast"): {
+        "pred_dir_orig": "outputs/HOVER/predictions/full_wo_evidence_contrast",
+        "pred_dir_sym":  None,
+    },
 }
 
 
@@ -108,10 +151,13 @@ DATASET_HEADLINE: Dict[str, Dict[str, str]] = {
 
 
 METHOD_LABELS = {
-    "claim_evidence": "claim-evidence",
-    "two_branch":     "Two-branch joint",
-    "full_wo_remix":  "Full w/o remix",
-    "full_egr_fv":    "**Full EGR-FV**",
+    "claim_evidence":       "claim-evidence",
+    "two_branch":           "Two-branch joint",
+    "full_wo_remix":        "Full w/o remix",
+    "hard_routing":         "Hard routing",
+    "random_remix_only":    "Random remix only",
+    "wo_evidence_contrast": "Full w/o evidence-contrast",
+    "full_egr_fv":          "**Full EGR-FV**",
 }
 
 
@@ -194,6 +240,32 @@ def accuracy(golds: Sequence[int]) -> float:
     if not golds:
         return 0.0
     return float(np.mean(golds))
+
+
+def per_class_recall(records: Sequence[Dict[str, Any]]) -> Dict[str, float]:
+    """Return {class_label_lower: recall} for every class that has at least one gold sample.
+
+    Used to expose minority-class collapse on imbalanced datasets (e.g. PolitiHop
+    where claim-evidence predicts all-REFUTES and SUPPORTS recall is 0).
+    """
+    pairs = per_sample_pairs(records)
+    counts: Dict[str, Tuple[int, int]] = {}
+    for _, g, p in pairs:
+        tp, n = counts.get(g, (0, 0))
+        counts[g] = (tp + int(g == p), n + 1)
+    return {cls: (tp / n if n > 0 else 0.0) for cls, (tp, n) in counts.items()}
+
+
+def collapse_indicator(records: Sequence[Dict[str, Any]]) -> Optional[str]:
+    """If predictions all share one label, return that label; else None.
+
+    Helps flag baselines that collapsed to a single class on a balanced
+    stress-test split.
+    """
+    preds = {_normalize(r.get("pred_label")) for r in records if r.get("pred_label") is not None}
+    if len(preds) == 1:
+        return preds.pop()
+    return None
 
 
 # ----- Paired tests ----------------------------------------------------------
@@ -468,9 +540,12 @@ def summarize(
         "per_run": defaultdict(dict),
         "aggregated": defaultdict(dict),
         "pvalues": defaultdict(dict),
+        "per_class": defaultdict(dict),
+        "collapse": defaultdict(dict),
     }
 
     headline_values: Dict[Tuple[str, str], List[float]] = defaultdict(list)
+    per_class_seeds: Dict[Tuple[str, str], Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
 
     for dataset in datasets:
         headline = DATASET_HEADLINE[dataset]
@@ -485,6 +560,13 @@ def summarize(
                 value = _metric_from_records(records, metric)
                 summary["per_run"][f"{dataset}|{method}"][f"seed{seed}"] = value
                 headline_values[(dataset, method)].append(value)
+                recalls = per_class_recall(records)
+                summary["per_class"][f"{dataset}|{method}"][f"seed{seed}"] = recalls
+                for cls, val in recalls.items():
+                    per_class_seeds[(dataset, method)][cls].append(val)
+                col = collapse_indicator(records)
+                if col is not None:
+                    summary["collapse"][f"{dataset}|{method}"][f"seed{seed}"] = col
 
     for (dataset, method), values in headline_values.items():
         arr = np.asarray(values, dtype=float)
@@ -541,12 +623,26 @@ def summarize(
     # ----- write outputs -----
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Aggregate per-class recall: mean ± std per (dataset, method, class).
+    per_class_agg: Dict[str, Dict[str, Dict[str, float]]] = defaultdict(dict)
+    for (dataset, method), cls_map in per_class_seeds.items():
+        for cls, vals in cls_map.items():
+            arr = np.asarray(vals, dtype=float)
+            per_class_agg[f"{dataset}|{method}"][cls] = {
+                "mean": float(arr.mean()),
+                "std": float(arr.std(ddof=1)) if arr.size >= 2 else 0.0,
+                "n_seeds": int(arr.size),
+            }
+
     # JSON dump
     summary_json = {
         "config": summary["config"],
         "per_run": dict(summary["per_run"]),
         "aggregated": dict(summary["aggregated"]),
         "pvalues": dict(summary["pvalues"]),
+        "per_class": dict(summary["per_class"]),
+        "per_class_aggregated": dict(per_class_agg),
+        "collapse": dict(summary["collapse"]),
     }
     (output_dir / "significance_summary.json").write_text(
         json.dumps(summary_json, indent=2), encoding="utf-8",
@@ -641,6 +737,52 @@ def summarize(
                 f"{info['mean_delta'] * 100:+.2f} | "
                 f"{boot_cell} | {rand_cell} |"
             )
+
+    # Per-class recall: surfaces minority-class collapse on imbalanced stress splits.
+    if per_class_agg:
+        md_lines.append("\n## Per-class recall (mean ± std across seeds)\n")
+        md_lines.append(
+            "Surfaces minority-class collapse: when a baseline predicts only one "
+            "class on a balanced stress split, accuracy ≈ 50 % and the missing-class "
+            "recall is 0.\n"
+        )
+        # Collect class universe per dataset (sorted).
+        for dataset in datasets:
+            classes_seen: List[str] = []
+            for method in methods:
+                cls_info = per_class_agg.get(f"{dataset}|{method}", {})
+                for cls in cls_info.keys():
+                    if cls not in classes_seen:
+                        classes_seen.append(cls)
+            if not classes_seen:
+                continue
+            classes_seen.sort()
+            md_lines.append(f"### {DATASET_HEADLINE[dataset]['label']}\n")
+            header = ["Method"] + [f"recall({c})" for c in classes_seen] + ["collapsed seeds"]
+            md_lines.append("| " + " | ".join(header) + " |")
+            md_lines.append("|" + "---|" * len(header))
+            for method in methods:
+                cls_info = per_class_agg.get(f"{dataset}|{method}", {})
+                if not cls_info:
+                    continue
+                cells = [METHOD_LABELS.get(method, method)]
+                for cls in classes_seen:
+                    info = cls_info.get(cls)
+                    if info is None:
+                        cells.append("—")
+                    elif info["n_seeds"] < 2:
+                        cells.append(f"{info['mean'] * 100:.1f} (n=1)")
+                    else:
+                        cells.append(f"{info['mean'] * 100:.1f} ± {info['std'] * 100:.1f}")
+                col_info = summary["collapse"].get(f"{dataset}|{method}", {})
+                if col_info:
+                    cells.append(
+                        ", ".join(f"{k}→{v}" for k, v in sorted(col_info.items()))
+                    )
+                else:
+                    cells.append("—")
+                md_lines.append("| " + " | ".join(cells) + " |")
+            md_lines.append("")
 
     md_lines.append("\n## Per-seed raw values\n")
     md_lines.append("| Dataset | Method | " + " | ".join(f"seed{s}" for s in seeds) + " |")

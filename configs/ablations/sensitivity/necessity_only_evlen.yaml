@@ -1,0 +1,15 @@
+base: ../../remix.yaml
+
+experiment:
+  name: sens_necessity_only_evlen
+
+data:
+  routing_path: data/HOVER/routed/sensitivity/necessity_only_evlen.jsonl
+
+checkpoints:
+  remix: outputs/HOVER/checkpoints/sensitivity/necessity_only_evlen/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/HOVER/checkpoints/sensitivity/necessity_only_evlen
+  log_dir: outputs/HOVER/logs/sensitivity/necessity_only_evlen
+  prediction_dir: outputs/HOVER/predictions/sensitivity/necessity_only_evlen

@@ -1,0 +1,18 @@
+base: ../../remix.yaml
+
+experiment:
+  name: sens_beta_050
+
+data:
+  routing_path: data/HOVER/routed/sensitivity/beta_050.jsonl
+
+routing:
+  beta_shortcut_gate: 0.5
+
+checkpoints:
+  remix: outputs/HOVER/checkpoints/sensitivity/beta_050/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/HOVER/checkpoints/sensitivity/beta_050
+  log_dir: outputs/HOVER/logs/sensitivity/beta_050
+  prediction_dir: outputs/HOVER/predictions/sensitivity/beta_050

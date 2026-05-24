@@ -1,0 +1,25 @@
+base: politihop.yaml
+
+experiment:
+  name: full_hard_routing_politihop
+  mode: full_hard_routing
+
+data:
+  routing_path: data/PolitiHop/routed/train_routing_hard.jsonl
+
+model:
+  use_fusion: false
+
+routing:
+  weighting: hard
+
+checkpoints:
+  remix: outputs/PolitiHop/checkpoints/full_hard_routing/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/PolitiHop/checkpoints/full_hard_routing
+  log_dir: outputs/PolitiHop/logs/full_hard_routing
+  prediction_dir: outputs/PolitiHop/predictions/full_hard_routing
+
+inference:
+  branch: grounded

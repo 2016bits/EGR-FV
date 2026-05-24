@@ -1,0 +1,21 @@
+base: fever.yaml
+
+experiment:
+  name: full_egr_fv_fever_retrieved
+  mode: full
+
+data:
+  train_path: data/FEVER/retrieved/train.jsonl
+  val_path: data/FEVER/retrieved/dev.jsonl
+  test_path: data/FEVER/retrieved/test.jsonl
+  routing_path: data/FEVER/retrieved/train_routing.jsonl
+
+checkpoints:
+  shortcut: outputs/FEVER/retrieved/checkpoints/shortcut_best.pt
+  grounded: outputs/FEVER/retrieved/checkpoints/grounded_best.pt
+  remix: outputs/FEVER/retrieved/checkpoints/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/FEVER/retrieved/checkpoints
+  log_dir: outputs/FEVER/retrieved/logs
+  prediction_dir: outputs/FEVER/retrieved/predictions

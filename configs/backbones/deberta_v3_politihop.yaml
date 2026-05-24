@@ -1,0 +1,25 @@
+base: ../politihop.yaml
+
+experiment:
+  name: full_egr_fv_deberta_v3_politihop
+
+model:
+  shortcut_encoder: microsoft/deberta-v3-base
+  grounded_encoder: microsoft/deberta-v3-base
+
+training:
+  batch_size: 8
+  lr: 2e-5
+
+data:
+  routing_path: data/PolitiHop/routed/train_routing_deberta_v3.jsonl
+
+checkpoints:
+  shortcut: outputs/PolitiHop/deberta_v3/checkpoints/shortcut_best.pt
+  grounded: outputs/PolitiHop/deberta_v3/checkpoints/grounded_best.pt
+  remix: outputs/PolitiHop/deberta_v3/checkpoints/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/PolitiHop/deberta_v3/checkpoints
+  log_dir: outputs/PolitiHop/deberta_v3/logs
+  prediction_dir: outputs/PolitiHop/deberta_v3/predictions

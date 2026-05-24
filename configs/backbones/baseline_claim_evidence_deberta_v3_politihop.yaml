@@ -1,0 +1,23 @@
+base: ../baseline_claim_evidence_politihop.yaml
+
+experiment:
+  name: baseline_claim_evidence_deberta_v3_politihop
+  mode: grounded_only
+
+model:
+  shortcut_encoder: microsoft/deberta-v3-base
+  grounded_encoder: microsoft/deberta-v3-base
+
+training:
+  batch_size: 8
+  lr: 2e-5
+
+checkpoints:
+  shortcut: ""
+  grounded: outputs/PolitiHop/deberta_v3/baselines/claim_evidence/checkpoints/grounded_best.pt
+  remix: ""
+
+outputs:
+  checkpoint_dir: outputs/PolitiHop/deberta_v3/baselines/claim_evidence/checkpoints
+  log_dir: outputs/PolitiHop/deberta_v3/baselines/claim_evidence/logs
+  prediction_dir: outputs/PolitiHop/deberta_v3/baselines/claim_evidence/predictions/politihop

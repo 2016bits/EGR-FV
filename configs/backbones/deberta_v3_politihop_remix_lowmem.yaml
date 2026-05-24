@@ -1,0 +1,8 @@
+base: deberta_v3_politihop.yaml
+
+experiment:
+  name: full_egr_fv_deberta_v3_politihop_remix_lowmem
+
+training:
+  batch_size: 4
+  lr: 2e-5

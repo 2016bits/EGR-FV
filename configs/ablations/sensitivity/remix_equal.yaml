@@ -1,0 +1,19 @@
+base: ../../remix.yaml
+
+experiment:
+  name: sens_remix_equal
+
+remix:
+  distribution_preserving_ratio:
+    original: 0.25
+    grounded_needed: 0.25
+    hard: 0.25
+    bias_easy: 0.25
+
+checkpoints:
+  remix: outputs/HOVER/checkpoints/sensitivity/remix_equal/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/HOVER/checkpoints/sensitivity/remix_equal
+  log_dir: outputs/HOVER/logs/sensitivity/remix_equal
+  prediction_dir: outputs/HOVER/predictions/sensitivity/remix_equal

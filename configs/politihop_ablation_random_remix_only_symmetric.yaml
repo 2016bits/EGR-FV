@@ -1,0 +1,10 @@
+base: politihop_ablation_random_remix_only.yaml
+
+experiment:
+  name: random_remix_only_symmetric_politihop
+
+data:
+  test_path: data/PolitiHop/converted_data/symmetric.json
+
+outputs:
+  prediction_dir: outputs/PolitiHop/predictions/random_remix_only/symmetric_politihop

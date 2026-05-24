@@ -1,0 +1,10 @@
+base: politihop_ablation_full_hard_routing.yaml
+
+experiment:
+  name: full_hard_routing_symmetric_politihop
+
+data:
+  test_path: data/PolitiHop/converted_data/symmetric.json
+
+outputs:
+  prediction_dir: outputs/PolitiHop/predictions/full_hard_routing/symmetric_politihop

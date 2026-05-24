@@ -1,0 +1,19 @@
+base: ../baseline_claim_evidence_hover.yaml
+
+experiment:
+  name: baseline_claim_evidence_deberta_v3_hover
+  mode: grounded_only
+
+model:
+  shortcut_encoder: microsoft/deberta-v3-base
+  grounded_encoder: microsoft/deberta-v3-base
+
+checkpoints:
+  shortcut: ""
+  grounded: outputs/HOVER/deberta_v3/baselines/claim_evidence/checkpoints/grounded_best.pt
+  remix: ""
+
+outputs:
+  checkpoint_dir: outputs/HOVER/deberta_v3/baselines/claim_evidence/checkpoints
+  log_dir: outputs/HOVER/deberta_v3/baselines/claim_evidence/logs
+  prediction_dir: outputs/HOVER/deberta_v3/baselines/claim_evidence/predictions

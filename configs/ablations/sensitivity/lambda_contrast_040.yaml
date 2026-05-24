@@ -1,0 +1,15 @@
+base: ../../remix.yaml
+
+experiment:
+  name: sens_lambda_contrast_040
+
+loss:
+  lambda_contrast: 0.4
+
+checkpoints:
+  remix: outputs/HOVER/checkpoints/sensitivity/lambda_contrast_040/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/HOVER/checkpoints/sensitivity/lambda_contrast_040
+  log_dir: outputs/HOVER/logs/sensitivity/lambda_contrast_040
+  prediction_dir: outputs/HOVER/predictions/sensitivity/lambda_contrast_040

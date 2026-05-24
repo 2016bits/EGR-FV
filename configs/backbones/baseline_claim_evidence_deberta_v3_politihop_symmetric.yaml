@@ -1,0 +1,10 @@
+base: baseline_claim_evidence_deberta_v3_politihop.yaml
+
+experiment:
+  name: baseline_claim_evidence_deberta_v3_politihop_symmetric
+
+data:
+  test_path: data/PolitiHop/converted_data/symmetric.json
+
+outputs:
+  prediction_dir: outputs/PolitiHop/deberta_v3/baselines/claim_evidence/predictions/symmetric

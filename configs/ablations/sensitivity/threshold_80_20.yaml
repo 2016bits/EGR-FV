@@ -1,0 +1,15 @@
+base: ../../remix.yaml
+
+experiment:
+  name: sens_threshold_80_20
+
+data:
+  routing_path: data/HOVER/routed/sensitivity/threshold_80_20.jsonl
+
+checkpoints:
+  remix: outputs/HOVER/checkpoints/sensitivity/threshold_80_20/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/HOVER/checkpoints/sensitivity/threshold_80_20
+  log_dir: outputs/HOVER/logs/sensitivity/threshold_80_20
+  prediction_dir: outputs/HOVER/predictions/sensitivity/threshold_80_20

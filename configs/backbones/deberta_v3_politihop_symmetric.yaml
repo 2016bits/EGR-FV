@@ -1,0 +1,10 @@
+base: deberta_v3_politihop.yaml
+
+experiment:
+  name: full_egr_fv_deberta_v3_politihop_symmetric
+
+data:
+  test_path: data/PolitiHop/converted_data/symmetric.json
+
+outputs:
+  prediction_dir: outputs/PolitiHop/deberta_v3/predictions/symmetric

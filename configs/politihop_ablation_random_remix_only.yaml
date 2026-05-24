@@ -1,0 +1,27 @@
+base: politihop.yaml
+
+experiment:
+  name: random_remix_only_politihop
+  mode: remix_only
+  pseudo_group_strategy: random
+  uniform_sample_weights: true
+
+model:
+  use_fusion: false
+
+loss:
+  use_grounded_dominant: false
+  use_evidence_contrast: false
+  lambda_shortcut: 0.1
+  lambda_orth: 0.0
+
+checkpoints:
+  remix: outputs/PolitiHop/checkpoints/random_remix_only/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/PolitiHop/checkpoints/random_remix_only
+  log_dir: outputs/PolitiHop/logs/random_remix_only
+  prediction_dir: outputs/PolitiHop/predictions/random_remix_only
+
+inference:
+  branch: grounded

@@ -15,6 +15,13 @@
 #   SEEDS="13 42 2024"
 #   METHODS="claim_evidence two_branch full_wo_remix full_egr_fv"
 #
+# Extended Tier-Should significance also supports three ablation methods
+# (hard_routing, random_remix_only, wo_evidence_contrast). They are NOT in
+# the default METHODS to avoid re-running the four already-completed anchors.
+# Invoke explicitly:
+#   METHODS="hard_routing random_remix_only wo_evidence_contrast" \
+#     sh run_scripts/run_significance.sh
+#
 # Usage:
 #   sh run_scripts/run_significance.sh
 #   SEEDS=13 DATASETS=politihop METHODS=claim_evidence sh run_scripts/run_significance.sh
@@ -105,6 +112,46 @@ resolve_combo() {
       SYM_CONFIG=""
       ACTION=remix_only ;;
 
+    # ---- Tier-Should extended methods ----
+    fever:hard_routing)
+      CONFIG=configs/fever_ablation_full_hard_routing.yaml
+      SYM_CONFIG=configs/fever_ablation_full_hard_routing_symmetric.yaml
+      ACTION=remix_with_hard_cache ;;
+    fever:random_remix_only)
+      CONFIG=configs/fever_ablation_random_remix_only.yaml
+      SYM_CONFIG=configs/fever_ablation_random_remix_only_symmetric.yaml
+      ACTION=remix_only ;;
+    fever:wo_evidence_contrast)
+      CONFIG=configs/fever_ablation_full_wo_evidence_contrast.yaml
+      SYM_CONFIG=configs/fever_ablation_full_wo_evidence_contrast_symmetric.yaml
+      ACTION=remix_only ;;
+
+    politihop:hard_routing)
+      CONFIG=configs/politihop_ablation_full_hard_routing.yaml
+      SYM_CONFIG=configs/politihop_ablation_full_hard_routing_symmetric.yaml
+      ACTION=remix_with_hard_cache ;;
+    politihop:random_remix_only)
+      CONFIG=configs/politihop_ablation_random_remix_only.yaml
+      SYM_CONFIG=configs/politihop_ablation_random_remix_only_symmetric.yaml
+      ACTION=remix_only ;;
+    politihop:wo_evidence_contrast)
+      CONFIG=configs/politihop_ablation_full_wo_evidence_contrast.yaml
+      SYM_CONFIG=configs/politihop_ablation_full_wo_evidence_contrast_symmetric.yaml
+      ACTION=remix_only ;;
+
+    hover:hard_routing)
+      CONFIG=configs/ablation_full_hard_routing.yaml
+      SYM_CONFIG=""
+      ACTION=remix_with_hard_cache ;;
+    hover:random_remix_only)
+      CONFIG=configs/ablation_random_remix_only.yaml
+      SYM_CONFIG=""
+      ACTION=remix_only ;;
+    hover:wo_evidence_contrast)
+      CONFIG=configs/ablation_full_wo_evidence_contrast.yaml
+      SYM_CONFIG=""
+      ACTION=remix_only ;;
+
     *)
       echo "[skip] unknown combo: $combo" >&2
       CONFIG=""
@@ -185,6 +232,34 @@ ensure_shared_warmup_and_routing() {
   run_stage "$main_config" routing         "$seed" "$tag" "$routing_path"
 }
 
+# Materialize a per-seed hard-routing cache from the existing soft routing.
+# The hard-routing ablation config points data.routing_path at
+# data/<DS>/routed/train_routing_hard.jsonl which run_tag rewrites to
+# data/<DS>/routed/<tag>/train_routing_hard.jsonl, mirroring the soft cache.
+ensure_hard_routing_cache() {
+  dataset="$1"; tag="$2"
+  main_config=$(shared_main_config "$dataset")
+  if [ -z "$main_config" ]; then
+    return 0
+  fi
+  soft_routing_path=$(resolve_path "$main_config" "$tag" data.routing_path)
+  if [ -z "$soft_routing_path" ] || [ ! -f "$soft_routing_path" ]; then
+    echo "[error] cannot materialize hard cache: soft routing missing at $soft_routing_path" >&2
+    return 1
+  fi
+  hard_routing_path=$(dirname "$soft_routing_path")/train_routing_hard.jsonl
+  if [ "$SKIP_EXISTING" = "1" ] && [ -f "$hard_routing_path" ]; then
+    echo "[skip] hard-routing cache already exists: $hard_routing_path"
+    return 0
+  fi
+  echo "[run]  materialize hard-routing cache → $hard_routing_path"
+  "$PYTHON_BIN" scripts/materialize_routing_variant.py \
+    --variant hard \
+    --source "$soft_routing_path" \
+    --output "$hard_routing_path" \
+    --overwrite
+}
+
 # Run a single (dataset, method, seed) combo end-to-end (training + eval).
 run_combo() {
   dataset="$1"; method="$2"; seed="$3"; tag="$4"
@@ -201,6 +276,10 @@ run_combo() {
       run_stage "$CONFIG" train_claim_evidence "$seed" "$tag" "$ckpt_dir/grounded_best.pt"
       ;;
     remix_only)
+      run_stage "$CONFIG" remix "$seed" "$tag" "$ckpt_dir/remix_best.pt"
+      ;;
+    remix_with_hard_cache)
+      ensure_hard_routing_cache "$dataset" "$tag"
       run_stage "$CONFIG" remix "$seed" "$tag" "$ckpt_dir/remix_best.pt"
       ;;
     *)
@@ -223,11 +302,12 @@ for dataset in $DATASETS; do
     tag="seed${seed}"
 
     # Per-seed shared pipeline (warmups + routing) — only needed if any
-    # remix_only method is requested.
+    # remix_only / remix_with_hard_cache method is requested.
     need_shared=0
     for method in $METHODS; do
       case "$method" in
         two_branch|full_wo_remix|full_egr_fv) need_shared=1 ;;
+        hard_routing|random_remix_only|wo_evidence_contrast) need_shared=1 ;;
       esac
     done
     if [ "$need_shared" = "1" ]; then

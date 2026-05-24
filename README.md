@@ -427,12 +427,22 @@ The headline tables above are single-seed runs, which makes it hard to tell whet
 
 Metrics are evaluated on the splits that actually probe shortcut robustness: **FEVER-sym** accuracy, **PolitiHop-sym** accuracy, and **HOVER** macro-F1.
 
-| Method            | FEVER-sym (Acc)   | PolitiHop-sym (Acc) | HOVER (macro-F1)  |
+| Method            | FEVER-sym (Acc) | PolitiHop-sym (Acc) | HOVER (macro-F1) |
 |---|---:|---:|---:|
-| claim-evidence    | mean ± std        | mean ± std          | mean ± std        |
-| Two-branch joint  | mean ± std        | mean ± std          | mean ± std        |
-| Full w/o remix    | mean ± std        | mean ± std          | mean ± std        |
-| **Full EGR-FV**   | mean ± std        | mean ± std          | mean ± std        |
+| claim-evidence    | 79.22 ± 1.64    | 50.00 ± 0.00 †      | 82.96 ± 0.62     |
+| Two-branch joint  | 79.50 ± 1.39    | 55.17 ± 3.33        | 84.06 ± 0.80     |
+| Full w/o remix    | 80.47 ± 1.48    | 55.46 ± 6.25        | 83.73 ± 0.44     |
+| **Full EGR-FV**   | **83.22 ± 1.20**| **59.94 ± 5.69**    | **83.89 ± 0.63** |
+
+Paired significance vs. `claim-evidence` (Fisher-combined across the three seeds, percentage-point Δ):
+
+| Method            | FEVER-sym Δ | PolitiHop-sym Δ | HOVER Δ |
+|---|---:|---:|---:|
+| Two-branch joint  | +0.28 (p=0.001) | +5.17 (p<0.001) | +1.11 (p<0.001) |
+| Full w/o remix    | +1.26 (p=0.12)  | +5.46 (p<0.001) | +0.77 (p=0.003) |
+| **Full EGR-FV**   | **+4.00 (p<0.001)** | **+9.94 (p<0.001)** | **+0.93 (p<0.001)** |
+
+**† Minority-class collapse on PolitiHop.** PolitiHop training is severely label-imbalanced (386 REFUTES vs. 79 SUPPORTS); the `claim-evidence` baseline collapses to predicting `REFUTES` on every seed, which on the balanced symmetric test set yields exactly 50.00 % accuracy and 0 % SUPPORTS recall. EGR-FV's necessity-weighted remix sampler breaks the collapse — SUPPORTS recall rises from 0 % to 25.1 ± 13.0 % (mean ± std across seeds), and PolitiHop-sym accuracy improves by +9.94 pp. Per-class recall on every (dataset, method) pair is recorded in `outputs/significance/significance_report.md` under "Per-class recall".
 
 For every (method, dataset) pair we also run two paired significance tests vs. `claim-evidence` on the same seed, then combine per-seed p-values with Fisher's method:
 
@@ -562,6 +572,90 @@ routing_analysis_buckets.png / .pdf                    # § 3 figure
 routing_analysis_report.md                             # combined report
 routing_analysis_summary.json                          # everything in JSON
 ```
+
+## Case Study
+
+`scripts/build_case_study.py` joins per-sample routing-analysis records with the raw claim/evidence text and surfaces four kinds of cases that probe how EGR-FV uses the routing signal. Outputs land at `outputs/analysis/case_study/case_study.md` (paper-ready tables) plus per-dataset `cases_<DS>.jsonl` / `cases_<DS>.csv` for the appendix.
+
+The four categories are:
+
+- **A. Evidence-rescue** — `grounded_needed` samples where the claim-only warm-up is fooled by surface form but EGR-FV recovers from the evidence.
+- **B. Evidence-sensitive (non-`grounded_needed`)** — `hard` or `bias_easy` samples where EGR-FV is correct under clean evidence but flips under null and shuffled evidence — the model is not memorising, it is reading.
+- **C. Bias-easy trade-off** — `bias_easy` samples where the claim-only warm-up gets it right but EGR-FV is wrong; the price the model pays for de-biasing.
+- **D. Hard-bucket win** — `hard` samples where both warm-ups fail but EGR-FV is correct on the clean evidence.
+
+Two illustrative HOVER cases (full tables in the report; per-class loss columns omitted for brevity):
+
+| Category | Claim | Evidence (truncated) | Gold | claim-only | claim-evidence | EGR-FV (clean / null / shuf) |
+|---|---|---|---|---|---|---|
+| **A. Evidence-rescue** | *The movie Groundhog Day was directed by Harold Ramis and stars Bill Paxton.* | "Groundhog Day is a 1993 … directed by Harold Ramis, **starring Bill Murray** …" | refutes | supports ✗ | ✓ | ✓ / ✗ / ✗ |
+| **D. Hard-bucket win** | *Iqaluit Airport and Canadian North are based out of Montreal.* | "Iqaluit Airport … operated by the **government of Nunavut**. It hosts scheduled passenger service from Ottawa, Montreal …" | refutes | supports ✗ | ✗ | ✓ / ✗ / ✗ |
+
+In both rows the `null` and `shuffled` columns are wrong even though `clean` is right — exactly the behaviour an evidence-grounded model should exhibit. Reproduction:
+
+```bash
+python scripts/build_case_study.py
+python scripts/build_case_study.py --datasets HOVER FEVER --per_category 5
+```
+
+## Retrieved-Evidence Experiment
+
+The headline tables use **gold** evidence (the gold sentence is already in the converted dataset). To check how EGR-FV behaves in a realistic FEVER pipeline with **retrieved** evidence, `scripts/retrieve_fever_evidence.py` builds top-`K` BM25 sentences per claim:
+
+- For FEVER train / dev / test, candidate documents come from the FEVER_baseline cache (`expanded_doc_ids.pkl`); sentences are BM25-reranked against the claim and the top 5 are concatenated.
+- For symmetric-FEVER (whose claims aren't in the cache), a TF-IDF index over the 5.4M Wikipedia titles in `data.db` selects top-20 candidate pages first, then the same BM25 sentence ranking applies.
+
+```bash
+python scripts/retrieve_fever_evidence.py --split test
+python scripts/retrieve_fever_evidence.py --split symmetric
+python scripts/retrieve_fever_evidence.py --split train
+python scripts/retrieve_fever_evidence.py --split dev
+python scripts/filter_retrieved_train.py  # drop rows with empty retrieval (~9k of 110k)
+```
+
+Two compare-points get evaluated:
+
+- **Gold → Retrieved-test** (cheap MVP): take the gold-evidence checkpoints and evaluate them directly on retrieved sentences. Stress-tests robustness to retrieval noise.
+- **Retrieved → Retrieved-test** (apples-to-apples): retrain claim-evidence and full EGR-FV on the retrieved-evidence training set (`run_scripts/run_claim_evidence_fever_retrieved.sh`, `run_scripts/run_fever_retrieved.sh`) and evaluate on the retrieved test + symmetric splits.
+
+The consolidated numbers live at `outputs/FEVER/retrieved/retrieved_evidence_report.md` (regenerated by `python scripts/summarize_retrieved_evidence.py`):
+
+| Method | Training evidence | FEVER orig (Acc) | FEVER-sym (Acc) |
+|---|---|---:|---:|
+| claim-evidence | Gold → Gold-test (headline) | 94.13 | 79.36 |
+| claim-evidence | Gold → Retrieved-test | 63.43 | 37.80 |
+| claim-evidence | Retrieved → Retrieved-test | 78.28 | 37.66 |
+| **Full EGR-FV** | Gold → Gold-test (headline) | 94.09 | 83.26 |
+| **Full EGR-FV** | Gold → Retrieved-test | 60.88 | 37.66 |
+| **Full EGR-FV** | Retrieved → Retrieved-test | 77.96 | 37.10 |
+
+Findings: (1) gold-trained models drop ~30 pt on FEVER orig and ~45 pt on FEVER-sym when handed retrieved evidence — they relied on the cleanliness of gold sentences. (2) Retraining on retrieved evidence recovers most of the original-test accuracy (77.96 vs. 94.13) but the bias-stressed symmetric split stays around 37 % regardless of method. (3) Under noisy retrieval, **EGR-FV does not beat the claim-evidence baseline** — both land at the same plateau (~78 / 37). This is an honest caveat to surface: EGR-FV's evidence-contrast and remix machinery rely on evidence being meaningful; with BM25 retrieval errors that bring in off-topic Wikipedia sentences, the per-sample necessity score becomes a noisy signal.
+
+## Backbone Generalization + LLM Baseline
+
+Two extensions that EMNLP reviewers typically ask for:
+
+1. **Backbone generalization** — `scripts/run_*` and `configs/backbones/deberta_v3_*.yaml` retrain both `claim-evidence` and full `EGR-FV` with DeBERTa-v3-base on HOVER, FEVER, and PolitiHop. Verifies the method isn't RoBERTa-specific.
+2. **LLM baseline** — `scripts/run_llm_baseline.py` evaluates Llama-3-8B-Instruct (4-shot prompt, greedy decoding, evidence truncated to 600 chars to bound prompt length) on the same splits.
+
+Both are consolidated by `python scripts/summarize_backbone_and_llm.py` into `outputs/analysis/backbone_llm/backbone_llm_report.md`. The script is safe to run incrementally — missing rows render as "—" until the underlying eval_report.json lands.
+
+Current numbers (Test / Symmetric for FEVER + PolitiHop, Test only for HOVER):
+
+| Backbone | Method | HOVER (macro-F1) | FEVER orig | FEVER-sym | PolitiHop orig | PolitiHop-sym |
+|---|---|---:|---:|---:|---:|---:|
+| RoBERTa-base | claim-evidence | 82.96 (±0.62 multi-seed) | 94.13 | 79.36 | (collapse) | 50.00 |
+| RoBERTa-base | **EGR-FV** | 83.93 | 94.09 | 83.26 | 88.30 | 58.77 |
+| DeBERTa-v3-base | claim-evidence | 84.82 | **95.45** | 83.68 | (collapse) | 50.00 |
+| DeBERTa-v3-base | **EGR-FV** | **85.82** | 95.08 | **84.10** | 87.72 | 51.17 |
+| Llama-3-8B-Instruct (4-shot) | — | 56.90 | 85.81 | 66.53 | 88.89 | 61.99 |
+
+Take-aways:
+
+- **EGR-FV transfers to DeBERTa-v3.** On HOVER, EGR-FV gains another **+1.9 pp** macro-F1 (83.93 → 85.82). On FEVER-sym, swapping the backbone and running EGR-FV combine to give 84.10, a **+4.7 pp** improvement over the RoBERTa-base claim-evidence baseline (79.36) and **+0.84 pp** over the RoBERTa-base full EGR-FV (83.26). On FEVER-orig the two backbones are essentially tied (94 ↔ 95) — at saturation there's not much room to win.
+- **DeBERTa-v3 alone closes most of the bias gap on FEVER-sym** (claim-evidence 83.68), and EGR-FV adds **+0.42 pp** on top. The two contributions are nearly additive.
+- **Llama-3-8B-Instruct is a strong PolitiHop baseline** (sym 61.99, beating EGR-FV-RoBERTa 58.77) but loses by a wide margin on FEVER-sym (66.53 vs. 83.26) and HOVER (56.90 vs. 83.93). A 110 M-param fine-tuned model with the right inductive bias beats an 8 B LLM in 4-shot mode on the bias-stress tests.
+- **PolitiHop is the weakest signal.** Both RoBERTa- and DeBERTa-claim-evidence baselines collapse to all-REFUTES on the balanced symmetric split (= 50.00 % by construction, since training is 83 % REFUTES). EGR-FV breaks the collapse on RoBERTa (58.77) but only barely on DeBERTa-v3 (51.17, supports recall ≈ 13 %). The dataset is small enough that backbone swaps have unstable effects.
 
 ## Repository Structure
 

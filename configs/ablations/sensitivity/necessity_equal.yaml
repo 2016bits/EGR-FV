@@ -1,0 +1,15 @@
+base: ../../remix.yaml
+
+experiment:
+  name: sens_necessity_equal
+
+data:
+  routing_path: data/HOVER/routed/sensitivity/necessity_equal.jsonl
+
+checkpoints:
+  remix: outputs/HOVER/checkpoints/sensitivity/necessity_equal/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/HOVER/checkpoints/sensitivity/necessity_equal
+  log_dir: outputs/HOVER/logs/sensitivity/necessity_equal
+  prediction_dir: outputs/HOVER/predictions/sensitivity/necessity_equal

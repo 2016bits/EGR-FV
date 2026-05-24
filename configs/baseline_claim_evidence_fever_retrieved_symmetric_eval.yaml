@@ -1,0 +1,10 @@
+base: baseline_claim_evidence_fever_retrieved.yaml
+
+experiment:
+  name: baseline_claim_evidence_fever_retrieved_symmetric_eval
+
+data:
+  test_path: data/FEVER/retrieved/symmetric.jsonl
+
+outputs:
+  prediction_dir: outputs/FEVER/retrieved/baselines/claim_evidence/predictions/symmetric

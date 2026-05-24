@@ -1,0 +1,18 @@
+base: ../../remix.yaml
+
+experiment:
+  name: sens_alpha_200
+
+data:
+  routing_path: data/HOVER/routed/sensitivity/alpha_200.jsonl
+
+routing:
+  alpha_grounded_weight: 2.0
+
+checkpoints:
+  remix: outputs/HOVER/checkpoints/sensitivity/alpha_200/remix_best.pt
+
+outputs:
+  checkpoint_dir: outputs/HOVER/checkpoints/sensitivity/alpha_200
+  log_dir: outputs/HOVER/logs/sensitivity/alpha_200
+  prediction_dir: outputs/HOVER/predictions/sensitivity/alpha_200

@@ -1,0 +1,10 @@
+base: baseline_claim_evidence_fever.yaml
+
+experiment:
+  name: baseline_claim_evidence_fever_retrieved_test
+
+data:
+  test_path: data/FEVER/retrieved/test.jsonl
+
+outputs:
+  prediction_dir: outputs/FEVER/baselines/claim_evidence/predictions/retrieved_test
